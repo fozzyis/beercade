@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "boss",
+    "astro/daemon",
+    "shared/crates/beercade-shared",
+]
+resolver = "2"

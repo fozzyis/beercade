@@ -1,0 +1,119 @@
+{
+  "target_soc": "Rockchip RK3588S",
+  "target_cpu": "ARM Cortex-A76 (ARMv8.2-A+crypto+fp16+dotprod)",
+  "target_gpu": "ARM Mali-G610 MP4 (Panthor / PanVK Vulkan 1.4)",
+  "cores": [
+    {
+      "name": "FBNeo",
+      "systems": ["Arcade", "NeoGeo", "Capcom CPS-1/2/3", "Cave Shmups"],
+      "upstream": "https://github.com/libretro/FBNeo.git",
+      "build_flags": "ARCH=arm64 HAVE_GLES=1 HAVE_NEON=1",
+      "output_binary": "fbneo_libretro.so"
+    },
+    {
+      "name": "DuckStation",
+      "systems": ["Sony PlayStation (PS1 / PSX)"],
+      "upstream": "https://github.com/stenzek/duckstation.git",
+      "build_flags": "-DUSE_VULKAN=ON -DUSE_SDL2=ON -DBUILD_NOGUI=ON",
+      "output_binary": "duckstation_libretro.so"
+    },
+    {
+      "name": "PCSX2",
+      "systems": ["Sony PlayStation 2 (PS2)"],
+      "upstream": "https://github.com/PCSX2/pcsx2.git",
+      "build_flags": "-DCMAKE_BUILD_TYPE=Release -DENABLE_VULKAN=ON -DENABLE_DIRECT_KMS=ON",
+      "output_binary": "pcsx2-standalone"
+    },
+    {
+      "name": "Dolphin",
+      "systems": ["Nintendo GameCube", "Nintendo Wii"],
+      "upstream": "https://github.com/dolphin-emu/dolphin.git",
+      "build_flags": "-DCMAKE_BUILD_TYPE=Release -DENABLE_VULKAN=ON -DENABLE_HEADLESS=ON",
+      "output_binary": "dolphin-emu-nogui"
+    },
+    {
+      "name": "PPSSPP",
+      "systems": ["Sony PlayStation Portable (PSP)"],
+      "upstream": "https://github.com/hrydgard/ppsspp.git",
+      "build_flags": "-DCMAKE_BUILD_TYPE=Release -DVULKAN=ON",
+      "output_binary": "ppsspp_libretro.so"
+    },
+    {
+      "name": "Flycast",
+      "systems": ["Sega Dreamcast", "Naomi", "Atomiswave"],
+      "upstream": "https://github.com/flyinghead/flycast.git",
+      "build_flags": "-DLOW_END=OFF -DUSE_VULKAN=ON -DLIBRETRO=ON",
+      "output_binary": "flycast_libretro.so"
+    },
+    {
+      "name": "Mupen64Plus-Next",
+      "systems": ["Nintendo 64"],
+      "upstream": "https://github.com/libretro/mupen64plus-libretro-nx.git",
+      "build_flags": "ARCH=arm64 HAVE_PARALLEL=1 HAVE_PARALLEL_RSP=1",
+      "output_binary": "mupen64plus_next_libretro.so"
+    },
+    {
+      "name": "Snes9x",
+      "systems": ["Super Nintendo (SNES)"],
+      "upstream": "https://github.com/libretro/snes9x.git",
+      "build_flags": "ARCH=arm64",
+      "output_binary": "snes9x_libretro.so"
+    },
+    {
+      "name": "Genesis-Plus-GX",
+      "systems": ["Sega Mega Drive / Genesis", "Master System", "Game Gear", "Sega CD"],
+      "upstream": "https://github.com/libretro/Genesis-Plus-GX.git",
+      "build_flags": "ARCH=arm64",
+      "output_binary": "genesis_plus_gx_libretro.so"
+    },
+    {
+      "name": "mGBA",
+      "systems": ["Game Boy Advance (GBA)", "Game Boy Color (GBC)", "Game Boy (GB)"],
+      "upstream": "https://github.com/mgba-emu/mgba.git",
+      "build_flags": "-DBUILD_LIBRETRO=ON -DUSE_GLES3=ON",
+      "output_binary": "mgba_libretro.so"
+    },
+    {
+      "name": "MAME 2003-Plus",
+      "systems": ["Midway Arcade (Mortal Kombat, NBA Jam, NFL Blitz)", "Classic 80s/90s MAME"],
+      "upstream": "https://github.com/libretro/mame2003-plus-libretro.git",
+      "build_flags": "ARCH=arm64",
+      "output_binary": "mame2003_plus_libretro.so"
+    },
+    {
+      "name": "Vita3K",
+      "systems": ["Sony PlayStation Vita (PS Vita)"],
+      "upstream": "https://github.com/Vita3K/Vita3K.git",
+      "build_flags": "-DCMAKE_BUILD_TYPE=Release -DUSE_VULKAN=ON",
+      "output_binary": "vita3k-standalone"
+    },
+    {
+      "name": "Lime3DS",
+      "systems": ["Nintendo 3DS"],
+      "upstream": "https://github.com/Lime3DS/Lime3DS.git",
+      "build_flags": "-DCMAKE_BUILD_TYPE=Release -DENABLE_VULKAN=ON",
+      "output_binary": "lime3ds-cli"
+    },
+    {
+      "name": "Supermodel",
+      "systems": ["Sega Model 3 Arcade (Daytona USA 2, Scud Race, Sega Rally 2, VF3)"],
+      "upstream": "https://github.com/trzy/Supermodel.git",
+      "build_flags": "-DCMAKE_BUILD_TYPE=Release",
+      "output_binary": "supermodel"
+    },
+    {
+      "name": "Hypseus Singe",
+      "systems": ["Laserdisc Arcade (Dragon's Lair, Space Ace, Cliff Hanger)"],
+      "upstream": "https://github.com/DirtBagXon/hypseus-singe.git",
+      "build_flags": "-DCMAKE_BUILD_TYPE=Release",
+      "output_binary": "hypseus"
+    },
+    {
+      "name": "DOSBox-Pure",
+      "systems": ["DOS 90s PC Arcade (DOOM II, Duke Nukem 3D, Quake, Blood)"],
+      "upstream": "https://github.com/schellingb/dosbox-pure.git",
+      "build_flags": "ARCH=arm64",
+      "output_binary": "dosbox_pure_libretro.so"
+    }
+  ]
+}

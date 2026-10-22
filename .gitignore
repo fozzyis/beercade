@@ -1,0 +1,34 @@
+# B.E.E.R.C.A.D.E. Root Git Ignore
+.ai-ignore/
+target/
+boss/target/
+astro/daemon/target/
+astro/rt/build/
+*.log
+node_modules/
+.svelte-kit/
+dist/*.img
+dist/*.squashfs
+boss/dist/*.img
+
+# Build outputs produced by the buildfarm (not source)
+astro/rootfs/usr/lib/
+astro/rootfs/boot/Image
+astro/rootfs/boot/kernel_*.img
+astro/rootfs/boot/initramfs-*.img
+astro/rootfs/boot/*.dtb
+astro/rootfs/boot/overlays/
+boss/build/
+boss/dist/
+website/build/
+*.squashfs
+*.raw
+astro/rootfs/usr/share/
+astro/rootfs/usr/include/
+astro/rootfs/usr/bin/
+astro/rootfs/usr/sbin/
+astro/rootfs/lib/
+astro/rootfs/usr/local/bin/astro-daemon
+
+# Local copies holding real credentials
+*.local

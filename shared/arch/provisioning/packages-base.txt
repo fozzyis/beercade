@@ -1,0 +1,29 @@
+# B.E.E.R.C.A.D.E. Unified Arch Linux Base Package List
+# Common baseline across RPi 4/5, Radxa Rock 5C, and Orange Pi 5 Pro
+base
+base-devel
+linux-firmware
+systemd
+systemd-sysvcompat
+openssh
+sudo
+avahi
+nss-mdns
+curl
+wget
+rsync
+tar
+bsdtar
+parted
+e2fsprogs
+dosfstools
+squashfs-tools
+pciutils
+usbutils
+ethtool
+jq
+libdrm
+mesa
+alsa-lib
+alsa-utils
+evtest

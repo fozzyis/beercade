@@ -1,0 +1,30 @@
+services:
+  boss:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: beercade/boss:latest
+    container_name: beercade-boss
+    restart: unless-stopped
+    ports:
+      - "8989:8989/tcp"
+      - "9750:9750/udp"
+    environment:
+      - BOSS_HOST=0.0.0.0
+      - BOSS_PORT=8989
+      - BOSS_NETPLAY_UDP_PORT=9750
+      - BOSS_NODE_TOKEN=${BOSS_NODE_TOKEN}
+      - BOSS_RPC_TOKEN=${BOSS_RPC_TOKEN}
+      - RUST_LOG=info
+    volumes:
+      - boss_sync_data:/data/beercade/sync
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  boss_sync_data:
+    driver: local

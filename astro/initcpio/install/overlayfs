@@ -1,0 +1,12 @@
+#!/bin/bash
+build() {
+    add_module "overlay"
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+This hook sets up a volatile tmpfs OverlayFS union over a read-only root mount. 
+It protects the underlying ext4/squashfs system from abrupt power-cuts in the arcade cabinet environment.
+HELPEOF
+}

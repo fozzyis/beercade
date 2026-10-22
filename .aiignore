@@ -1,0 +1,12 @@
+# B.E.E.R.C.A.D.E. AI Ignore
+.ai-ignore/
+target/
+boss/target/
+astro/daemon/target/
+astro/rt/build/
+*.log
+node_modules/
+.svelte-kit/
+dist/*.img
+dist/*.squashfs
+boss/dist/*.img

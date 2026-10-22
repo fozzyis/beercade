@@ -1,0 +1,19 @@
+[Match]
+Name=eth* en* end* lan*
+Type=ether
+
+[Network]
+DHCP=yes
+DNSSEC=no
+LinkLocalAddressing=fallback
+MulticastDNS=yes
+LLMNR=yes
+
+[DHCPv4]
+MaxAttempts=infinity
+UseDNS=yes
+RouteMetric=100
+
+[DHCPv6]
+UseDNS=yes
+RouteMetric=100

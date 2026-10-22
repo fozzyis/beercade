@@ -1,0 +1,83 @@
+{
+  "ecosystem": "B.E.E.R.C.A.D.E.",
+  "schema_version": "1.0.0",
+  "profiles": {
+    "rpi5": {
+      "name": "Raspberry Pi 5",
+      "target_role": "boss",
+      "soc": "Broadcom BCM2712",
+      "arch": "aarch64",
+      "cpu_cores": 4,
+      "cpu_cluster": "Cortex-A76",
+      "page_size": 16384,
+      "gpu": "Broadcom VideoCore VII (V3D 7.1)",
+      "display_driver": "vc4",
+      "audio_driver": "snd_bcm2835 / vc4-hdmi",
+      "storage_interfaces": ["sdhci", "pcie-nvme"],
+      "io_controller": "RP1 (1de4:0001)",
+      "recommended_thermal_governor": "ondemand"
+    },
+    "rpi4": {
+      "name": "Raspberry Pi 4",
+      "target_role": "boss",
+      "soc": "Broadcom BCM2711",
+      "arch": "aarch64",
+      "cpu_cores": 4,
+      "cpu_cluster": "Cortex-A72",
+      "page_size": 4096,
+      "gpu": "Broadcom VideoCore VI (V3D 4.2)",
+      "display_driver": "vc4",
+      "audio_driver": "snd_bcm2835",
+      "storage_interfaces": ["sdhci", "usb3"],
+      "recommended_thermal_governor": "ondemand"
+    },
+    "rock5c": {
+      "name": "Radxa ROCK 5C",
+      "target_role": "astro",
+      "soc": "Rockchip RK3588S / RK3588S2",
+      "arch": "aarch64",
+      "cpu_cores": 8,
+      "cpu_clusters": {
+        "little": {"cores": [0, 1, 2, 3], "type": "Cortex-A55"},
+        "big": {"cores": [4, 5, 6, 7], "type": "Cortex-A76"}
+      },
+      "page_size": 4096,
+      "gpu": "ARM Mali-G610 MP4 (Panthor / PanVK)",
+      "display_driver": "panthor / drm-kms",
+      "audio_driver": "rockchipdp0 / alsa",
+      "storage_interfaces": ["emmc", "sdhci", "nvme"],
+      "thermal": {
+        "pwm_fan_channel": "pwm14",
+        "trip_points": [
+          {"temp_c": 50, "pwm": 64},
+          {"temp_c": 65, "pwm": 128},
+          {"temp_c": 75, "pwm": 255}
+        ]
+      }
+    },
+    "orangepi5pro": {
+      "name": "Orange Pi 5 Pro",
+      "target_role": "astro",
+      "soc": "Rockchip RK3588S",
+      "arch": "aarch64",
+      "cpu_cores": 8,
+      "cpu_clusters": {
+        "little": {"cores": [0, 1, 2, 3], "type": "Cortex-A55"},
+        "big": {"cores": [4, 5, 6, 7], "type": "Cortex-A76"}
+      },
+      "page_size": 4096,
+      "gpu": "ARM Mali-G610 MP4 (Panthor / PanVK)",
+      "display_driver": "panthor / drm-kms",
+      "audio_driver": "rockchip-hdmi / alsa",
+      "storage_interfaces": ["emmc", "sdhci", "nvme"],
+      "thermal": {
+        "pwm_fan_channel": "pwm15",
+        "trip_points": [
+          {"temp_c": 50, "pwm": 64},
+          {"temp_c": 65, "pwm": 128},
+          {"temp_c": 75, "pwm": 255}
+        ]
+      }
+    }
+  }
+}

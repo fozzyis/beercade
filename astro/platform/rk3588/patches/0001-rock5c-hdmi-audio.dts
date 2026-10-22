@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Radxa Rock 5C (RK3588S) Mainline 7.2+ HDMI Audio DTS Overlay
+ * B.E.E.R.C.A.D.E. A.S.T.R.O. Appliance
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "radxa,rock-5c", "rockchip,rk3588s";
+
+    fragment@0 {
+        target = <&hdmi0_sound>;
+        __overlay__ {
+            status = "okay";
+        };
+    };
+
+    fragment@1 {
+        target = <&i2s5_8ch>;
+        __overlay__ {
+            status = "okay";
+            #sound-dai-cells = <0>;
+        };
+    };
+
+    fragment@2 {
+        target = <&hdmi0>;
+        __overlay__ {
+            status = "okay";
+            #sound-dai-cells = <0>;
+        };
+    };
+};

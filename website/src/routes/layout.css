@@ -1,0 +1,344 @@
+@import "tailwindcss";
+
+@theme {
+  --color-neon-green: #39ff14;
+  --color-neon-magenta: #ff007f;
+  --color-neon-cyan: #00ffff;
+  --color-dark-base: #14101a;
+
+  --color-crema: #f5f2eb;
+  --color-high-score-orange: #ff5f1f;
+  --color-tilt-purple: #2a1745;
+  --color-after-dark: #14101a;
+
+  --font-sans: "Inter", sans-serif;
+  --font-mono: "VT323", monospace;
+  --font-display: "Press Start 2P", monospace;
+}
+
+/* ============================================================
+   BASE
+   ============================================================ */
+@layer base {
+  body {
+    background-color: var(--color-dark-base);
+    color: white;
+    overflow-x: hidden;
+    cursor: crosshair;
+  }
+
+  a, button, [role="button"] {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23ff5f1f' stroke='%23fff' stroke-width='2'/%3E%3Ctext x='16' y='21' text-anchor='middle' font-size='14' fill='white' font-family='monospace'%3E%24%3C/text%3E%3C/svg%3E") 16 16, pointer;
+  }
+}
+
+/* ============================================================
+   1. CRT SCANLINES — JITTER + ROLL UPGRADE
+   ============================================================ */
+.crt-overlay {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background:
+    linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.28) 50%),
+    linear-gradient(90deg, rgba(255, 0, 0, 0.04), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.04));
+  background-size: 100% 3px, 5px 100%;
+  box-shadow:
+    inset 0 0 120px rgba(0, 0, 0, 0.95),
+    inset 0 0 30px rgba(0, 0, 0, 0.9);
+  animation: crt-flicker 0.11s infinite, crt-roll 8s linear infinite;
+}
+
+@keyframes crt-flicker {
+  0%   { opacity: 0.94; }
+  11%  { opacity: 1.00; }
+  22%  { opacity: 0.96; }
+  33%  { opacity: 1.00; }
+  44%  { opacity: 0.92; }
+  55%  { opacity: 1.00; }
+  66%  { opacity: 0.97; }
+  77%  { opacity: 1.00; }
+  88%  { opacity: 0.95; }
+  100% { opacity: 0.99; }
+}
+
+@keyframes crt-roll {
+  0%   { background-position: 0 0, 0 0; }
+  100% { background-position: 0 3px, 0 0; }
+}
+
+/* ============================================================
+   2. FILM GRAIN NOISE OVERLAY
+   ============================================================ */
+.film-grain {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+  opacity: 0.045;
+  animation: grain-shift 0.12s steps(1) infinite;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
+}
+
+@keyframes grain-shift {
+  0%   { background-position: 0 0; }
+  10%  { background-position: -12px -22px; }
+  20%  { background-position: 8px 14px; }
+  30%  { background-position: -5px 18px; }
+  40%  { background-position: 22px -8px; }
+  50%  { background-position: -18px 6px; }
+  60%  { background-position: 14px -20px; }
+  70%  { background-position: -22px 12px; }
+  80%  { background-position: 6px 22px; }
+  90%  { background-position: -14px -5px; }
+  100% { background-position: 0 0; }
+}
+
+/* ============================================================
+   3. PHOSPHOR BLOOM — PULSING NEON GLOW
+   ============================================================ */
+.glow-neon-green {
+  text-shadow:
+    0 0 4px #39ff14,
+    0 0 14px #39ff14,
+    0 0 32px #39ff1480;
+  animation: bloom-green 3.2s ease-in-out infinite;
+}
+@keyframes bloom-green {
+  0%, 100% { text-shadow: 0 0 4px #39ff14, 0 0 14px #39ff14, 0 0 32px #39ff1440; }
+  50%       { text-shadow: 0 0 6px #39ff14, 0 0 22px #39ff14, 0 0 55px #39ff1480, 0 0 90px #39ff1420; }
+}
+
+.glow-neon-magenta {
+  text-shadow:
+    0 0 4px #ff007f,
+    0 0 14px #ff007f,
+    0 0 32px #ff007f80;
+  animation: bloom-magenta 4.1s ease-in-out infinite;
+}
+@keyframes bloom-magenta {
+  0%, 100% { text-shadow: 0 0 4px #ff007f, 0 0 14px #ff007f, 0 0 32px #ff007f40; }
+  50%       { text-shadow: 0 0 6px #ff007f, 0 0 24px #ff007f, 0 0 60px #ff007f80, 0 0 100px #ff007f20; }
+}
+
+.glow-neon-cyan {
+  text-shadow:
+    0 0 4px #00ffff,
+    0 0 14px #00ffff,
+    0 0 32px #00ffff80;
+  animation: bloom-cyan 3.7s ease-in-out infinite;
+}
+@keyframes bloom-cyan {
+  0%, 100% { text-shadow: 0 0 4px #00ffff, 0 0 14px #00ffff, 0 0 32px #00ffff40; }
+  50%       { text-shadow: 0 0 6px #00ffff, 0 0 22px #00ffff, 0 0 55px #00ffff80, 0 0 90px #00ffff20; }
+}
+
+.glow-neon-orange {
+  text-shadow:
+    0 0 4px #ff5f1f,
+    0 0 16px #ff5f1f,
+    0 0 36px #ff5f1f80;
+  animation: bloom-orange 2.8s ease-in-out infinite;
+}
+@keyframes bloom-orange {
+  0%, 100% { text-shadow: 0 0 4px #ff5f1f, 0 0 16px #ff5f1f, 0 0 36px #ff5f1f40; }
+  50%       { text-shadow: 0 0 8px #ff5f1f, 0 0 28px #ff5f1f, 0 0 70px #ff5f1f80, 0 0 110px #ff5f1f20; }
+}
+
+/* ============================================================
+   4. GLITCH TEXT — RGB CHANNEL SEPARATION
+   ============================================================ */
+.glitch-text {
+  position: relative;
+  display: inline-block;
+  animation: glitch-idle 6s infinite;
+}
+
+.glitch-text::before,
+.glitch-text::after {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  clip-path: inset(0 0 100% 0);
+}
+
+.glitch-text::before {
+  color: #ff0044;
+  animation: glitch-red 6s infinite;
+  left: 3px;
+}
+
+.glitch-text::after {
+  color: #00ffff;
+  animation: glitch-blue 6s infinite;
+  left: -3px;
+}
+
+@keyframes glitch-idle {
+  0%, 86%, 100% { transform: skewX(0deg); }
+  87%           { transform: skewX(-1deg); }
+  88%           { transform: skewX(0.5deg); }
+  89%           { transform: skewX(0deg); }
+}
+
+@keyframes glitch-red {
+  0%, 85%, 100% { clip-path: inset(0 0 100% 0); opacity: 0; }
+  86%           { clip-path: inset(10% 0 55% 0); opacity: 0.9; transform: translateX(4px); }
+  87%           { clip-path: inset(60% 0 20% 0); opacity: 0.8; transform: translateX(-2px); }
+  88%           { clip-path: inset(30% 0 40% 0); opacity: 0.7; transform: translateX(3px); }
+  89%           { clip-path: inset(0 0 100% 0); opacity: 0; }
+}
+
+@keyframes glitch-blue {
+  0%, 85%, 100% { clip-path: inset(0 0 100% 0); opacity: 0; }
+  86%           { clip-path: inset(50% 0 20% 0); opacity: 0.9; transform: translateX(-4px); }
+  87%           { clip-path: inset(15% 0 65% 0); opacity: 0.8; transform: translateX(2px); }
+  88%           { clip-path: inset(70% 0 10% 0); opacity: 0.7; transform: translateX(-3px); }
+  89%           { clip-path: inset(0 0 100% 0); opacity: 0; }
+}
+
+/* ============================================================
+   5. NEON BORDER COLOUR CYCLE
+   ============================================================ */
+.neon-border-cycle {
+  animation: border-cycle 6s linear infinite;
+}
+
+@keyframes border-cycle {
+  0%   { box-shadow: 0 0 8px #ff5f1f, 0 0 20px #ff5f1f40; border-color: #ff5f1f; }
+  33%  { box-shadow: 0 0 8px #00ffff, 0 0 20px #00ffff40; border-color: #00ffff; }
+  66%  { box-shadow: 0 0 8px #39ff14, 0 0 20px #39ff1440; border-color: #39ff14; }
+  100% { box-shadow: 0 0 8px #ff5f1f, 0 0 20px #ff5f1f40; border-color: #ff5f1f; }
+}
+
+/* ============================================================
+   6. CARD HOVER SCAN WIPE
+   ============================================================ */
+.scan-wipe {
+  position: relative;
+  overflow: hidden;
+}
+
+.scan-wipe::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  top: -100%;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.9), rgba(0,255,255,0.6), transparent);
+  opacity: 0;
+  transition: none;
+  pointer-events: none;
+}
+
+.scan-wipe:hover::after {
+  animation: scan-sweep 0.55s ease-out forwards;
+}
+
+@keyframes scan-sweep {
+  0%   { top: -5%; opacity: 0.9; }
+  100% { top: 105%; opacity: 0; }
+}
+
+/* ============================================================
+   7. VHS TAPE WARP
+   ============================================================ */
+.vhs-video {
+  filter: contrast(1.12) saturate(1.3) hue-rotate(0deg);
+  animation: vhs-warp 9s ease-in-out infinite;
+}
+
+@keyframes vhs-warp {
+  0%, 92%, 100% { filter: contrast(1.12) saturate(1.3); transform: scaleX(1); }
+  93%           { filter: contrast(1.25) saturate(1.6) hue-rotate(4deg); transform: scaleX(1.005); }
+  94%           { filter: contrast(0.95) saturate(1.1) hue-rotate(-3deg); transform: scaleX(0.998); }
+  95%           { filter: contrast(1.12) saturate(1.3); transform: scaleX(1); }
+}
+
+.vhs-tear {
+  position: relative;
+  overflow: hidden;
+}
+
+.vhs-tear::before {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.15);
+  top: -100%;
+  z-index: 10;
+  animation: tape-tear 9s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes tape-tear {
+  0%, 91%  { top: -10%; opacity: 0; }
+  92%      { top: -10%; opacity: 0.8; }
+  95%      { top: 110%; opacity: 0.6; }
+  96%, 100%{ top: 110%; opacity: 0; }
+}
+
+/* ============================================================
+   8. PAGE TRANSITION FLASH
+   ============================================================ */
+.page-transition-flash {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: white;
+  opacity: 0;
+  animation: page-flash 0.22s ease-out forwards;
+}
+
+@keyframes page-flash {
+  0%   { opacity: 0.7; }
+  40%  { opacity: 0; }
+  60%  { opacity: 0.15; }
+  100% { opacity: 0; }
+}
+
+/* ============================================================
+   9. MARQUEE TICKER
+   ============================================================ */
+.ticker-wrap {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ticker-content {
+  display: inline-block;
+  animation: ticker-scroll 40s linear infinite;
+  will-change: transform;
+}
+
+@keyframes ticker-scroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+/* ============================================================
+   10. CRT BARREL DISTORTION (applied via SVG filter)
+   ============================================================ */
+.crt-barrel {
+  filter: url(#crt-barrel-filter);
+}
+
+/* ============================================================
+   EXTRAS: BOX GLOW UTILITIES
+   ============================================================ */
+.box-glow-orange {
+  box-shadow: 0 0 10px rgba(255, 95, 31, 0.4), 0 0 30px rgba(255, 95, 31, 0.15);
+}
+.box-glow-cyan {
+  box-shadow: 0 0 10px rgba(0, 255, 255, 0.4), 0 0 30px rgba(0, 255, 255, 0.15);
+}
+.box-glow-magenta {
+  box-shadow: 0 0 10px rgba(255, 0, 127, 0.4), 0 0 30px rgba(255, 0, 127, 0.15);
+}
+.box-glow-green {
+  box-shadow: 0 0 10px rgba(57, 255, 20, 0.4), 0 0 30px rgba(57, 255, 20, 0.15);
+}

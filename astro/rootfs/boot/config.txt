@@ -1,0 +1,13 @@
+# ==============================================================================
+# B.O.S.S. Raspberry Pi 5 (Broadcom BCM2712) Boot Configuration
+# Loaded by on-board SPI EEPROM bootloader (No start4.elf required)
+# ==============================================================================
+arm_64bit=1
+kernel=kernel_2712.img
+initramfs initramfs-linux.img followkernel
+enable_uart=1
+uart_2ndstage=1
+dtoverlay=vc4-kms-v3d-pi5,cma-512
+disable_overscan=1
+hdmi_force_hotplug=1
+hdmi_drive=2

@@ -1,0 +1,13 @@
+//! # B.E.E.R.C.A.D.E. Shared Core Library
+//!
+//! Centralized protocol contracts, authentication primitives, data models,
+//! and cryptographic verification utilities shared between B.O.S.S. and A.S.T.R.O.
+
+pub mod auth;
+pub mod crypto;
+pub mod ipc;
+pub mod models;
+
+pub use auth::{constant_time_eq, extract_bearer_token, format_bearer_header, validate_token, NodeClaim};
+pub use crypto::{compute_sha256, verify_sha256};
+pub use models::*;

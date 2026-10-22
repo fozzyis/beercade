@@ -1,0 +1,25 @@
+# =============================================================================
+# B.E.E.R.C.A.D.E. A.S.T.R.O. - Real-time evdev arcade encoder access (1000 Hz)
+# -----------------------------------------------------------------------------
+# Grants the beercade runtime direct, non-root read access to the arcade
+# encoders and tags every joystick-capable evdev node for the RT scheduler.
+# SCHED_FIFO(90) itself is granted by 50-beercade-rt.conf (rtprio 90) and is
+# applied by the astro_rt producer thread when it opens these nodes.
+# Install to: /etc/udev/rules.d/92-beercade-input-rt.rules
+# =============================================================================
+
+# Sanwa / Xin-Mo / generic USB arcade encoders: direct evdev access, RT tag.
+SUBSYSTEM=="input", ATTRS{name}=="*Arcade*",  MODE="0666", ENV{ID_INPUT_JOYSTICK}="1", ENV{BEERCADE_RT}="1"
+SUBSYSTEM=="input", ATTRS{name}=="*Encoder*", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1", ENV{BEERCADE_RT}="1"
+SUBSYSTEM=="input", ATTRS{name}=="*Xin-Mo*",  MODE="0666", ENV{ID_INPUT_JOYSTICK}="1", ENV{BEERCADE_RT}="1"
+
+# DualShock / DualSense (Sony), Xbox pads (Microsoft): direct access, RT tag.
+SUBSYSTEM=="input", ATTRS{idVendor}=="054c", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1", ENV{BEERCADE_RT}="1"
+SUBSYSTEM=="input", ATTRS{idVendor}=="045e", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1", ENV{BEERCADE_RT}="1"
+
+# Seat the runtime user (udev seat tag so logind hands the devices over).
+SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", TAG+="uaccess"
+
+# Fallback: every evdev/js node stays world-open on the dedicated cabinet.
+KERNEL=="event*", SUBSYSTEM=="input", MODE="0666"
+KERNEL=="js*",    SUBSYSTEM=="input", MODE="0666"

@@ -1,0 +1,22 @@
+[binaries]
+c = 'aarch64-linux-gnu-gcc'
+cpp = 'aarch64-linux-gnu-g++'
+ar = 'aarch64-linux-gnu-ar'
+strip = 'aarch64-linux-gnu-strip'
+pkg-config = 'pkg-config'
+
+[built-in options]
+c_args = ['-O3', '-march=armv8.2-a+crypto+fp16+dotprod', '-mtune=cortex-a76', '-ffunction-sections', '-fdata-sections', '-fomit-frame-pointer']
+cpp_args = ['-O3', '-march=armv8.2-a+crypto+fp16+dotprod', '-mtune=cortex-a76', '-ffunction-sections', '-fdata-sections', '-fomit-frame-pointer']
+c_link_args = ['-Wl,--gc-sections', '-Wl,-O1', '-Wl,--as-needed']
+cpp_link_args = ['-Wl,--gc-sections', '-Wl,-O1', '-Wl,--as-needed']
+
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'cortex-a76'
+endian = 'little'
+
+[properties]
+sys_root = '/beercade-src/ASTRO/rootfs'
+pkg_config_libdir = '/beercade-src/ASTRO/rootfs/usr/lib/pkgconfig:/beercade-src/ASTRO/rootfs/usr/share/pkgconfig:/beercade-src/ASTRO/rootfs/usr/lib/aarch64-linux-gnu/pkgconfig'

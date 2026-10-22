@@ -1,0 +1,12 @@
+[Unit]
+Description=B.E.E.R.C.A.D.E. Fallback Static Network Assignment
+After=network-pre.target
+Before=network.target sshd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/boss_static_net.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

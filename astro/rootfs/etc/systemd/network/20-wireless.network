@@ -1,0 +1,13 @@
+[Match]
+Name=wlan* wlp*
+Type=wlan
+
+[Network]
+DHCP=yes
+DNSSEC=no
+MulticastDNS=yes
+IgnoreCarrierLoss=3s
+
+[DHCPv4]
+UseDNS=yes
+RouteMetric=600

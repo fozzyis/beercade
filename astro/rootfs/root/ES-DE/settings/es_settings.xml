@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<settings>
+    <string name="ROMDirectory" value="/root/ROMs" />
+    <string name="Theme" value="linear-es-de" />
+    <string name="ThemeVariant" value="" />
+    <string name="ThemeColorScheme" value="" />
+    <bool name="SplashScreen" value="true" />
+    <bool name="InputSwapButtons" value="false" />
+    <bool name="QuickSystemSelect" value="true" />
+    <bool name="ShowHelpPrompts" value="true" />
+    <int name="ApplicationRelease" value="3000" />
+</settings>

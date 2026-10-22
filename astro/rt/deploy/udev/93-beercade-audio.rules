@@ -1,0 +1,17 @@
+# =============================================================================
+# B.E.E.R.C.A.D.E. A.S.T.R.O. - rockchipdp0 ALSA hardware endpoint lock
+# -----------------------------------------------------------------------------
+# Locks the RK3588 on-board DP/HDMI audio endpoint (rockchipdp0) exclusively
+# for the beercade runtime so no other consumer can open the hw: device and
+# force ALSA through the plug/dmix path (a classic source of context-switch
+# deadlocks on this SoC).
+# Install to: /etc/udev/rules.d/93-beercade-audio.rules
+# =============================================================================
+
+# Mark the rockchip DP0 sound card and every PCM node on it as beercade-only.
+SUBSYSTEM=="sound", ATTRS{id}=="rockchipdp0", TAG+="uaccess"
+SUBSYSTEM=="sound", ATTRS{id}=="rockchipdp0", RUN+="/bin/sh -c 'test -d /run/beercade || mkdir -p /run/beercade'"
+
+# Direct hw: endpoints: group-locked, no plug emulation, no dmix on top.
+KERNEL=="pcmC*D0c", SUBSYSTEM=="sound", MODE="0660", GROUP="audio", ENV{BEERCAPTURE_HW}="1"
+KERNEL=="pcmC*D0p", SUBSYSTEM=="sound", MODE="0660", GROUP="audio", ENV{BEERPLAY_HW}="1"

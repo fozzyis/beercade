@@ -1,0 +1,44 @@
+[Unit]
+Description=B.E.E.R.C.A.D.E. B.O.S.S. Touchscreen Kiosk UI
+After=boss-server.service seatd.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+Environment=LIBSEAT_BACKEND=seatd
+Environment=WLR_LIBINPUT_NO_CONFIG=1
+Environment=WLR_BACKENDS=drm
+Environment=WLR_DRM_DEVICES=/dev/dri/card0
+Environment=WLR_NO_HARDWARE_CURSORS=1
+Environment=XDG_RUNTIME_DIR=/run/user/0
+PAMName=login
+
+ExecStartPre=/bin/sh -c 'mkdir -p /run/user/0 && chmod 700 /run/user/0'
+ExecStartPre=-/usr/bin/chvt 7
+ExecStartPre=/bin/sh -c 'rm -rf /tmp/chromium-boss'
+
+ExecStart=/usr/bin/cage -s -- /usr/bin/chromium \
+    --kiosk \
+    --no-sandbox \
+    --disable-setuid-sandbox \
+    --disable-seccomp-filter-sandbox \
+    --disable-gpu \
+    --disable-gpu-compositing \
+    --disable-software-rasterizer=false \
+    --disable-dev-shm-usage \
+    --disable-features=WaylandOverlayDelegation \
+    --ozone-platform=wayland \
+    --user-data-dir=/tmp/chromium-boss \
+    --app=http://127.0.0.1:8989
+
+Restart=always
+RestartSec=3s
+StandardInput=tty
+TTYPath=/dev/tty7
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=multi-user.target
