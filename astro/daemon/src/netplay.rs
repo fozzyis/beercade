@@ -1514,7 +1514,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
             self.loss_ewma_pct
         };
 
-        // 3. Thermal/power anomalies (RK3588S thermal zones).
+        // 3. Thermal/power anomalies.
         let (cpu, gpu) = sample_temps();
         let hot = cpu > CPU_TEMP_LIMIT_C || gpu > GPU_TEMP_LIMIT_C;
         let cool = cpu < CPU_TEMP_HYST_C && gpu < GPU_TEMP_HYST_C;
@@ -1610,16 +1610,18 @@ impl<C: DeterministicCore> RollbackSession<C> {
     }
 }
 
-/// RK3588S thermal-zone sampling (same /sys convention as main.rs).
+/// (cpu, gpu) temperatures in Celsius via beercade-hal. A failed read yields
+/// NaN, which compares false against both the hot and cool thresholds, so the
+/// watchdog neither enters nor leaves THERMAL_HOLD on bad data (the old code
+/// reported a fake 42 C here). Boards without a GPU sensor reuse the CPU value.
 pub fn sample_temps() -> (f32, f32) {
-    let read = |zone: u32| -> f32 {
-        std::fs::read_to_string(format!("/sys/class/thermal/thermal_zone{zone}/temp"))
-            .ok()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .map(|mc| mc / 1000.0)
-            .unwrap_or(42.0)
-    };
-    (read(0), read(1))
+    match beercade_hal::Platform::detect().read_thermals() {
+        Ok(t) => (t.cpu_c, t.gpu_c.unwrap_or(t.cpu_c)),
+        Err(e) => {
+            warn!(error = %e, "thermal read failed");
+            (f32::NAN, f32::NAN)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

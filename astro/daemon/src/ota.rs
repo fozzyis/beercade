@@ -1,15 +1,13 @@
-use std::fs;
-use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use reqwest::Client;
 use sha2::{Sha256, Digest};
 
-/// The two SquashFS boot slots. The system boots from a SquashFS payload on
-/// `/dev/sda2`; we OTA to the *other* slot and then atomically flip the U-Boot
-/// target so the active runtime is never touched mid-flash.
-const SLOT_A: &'static str = "/dev/sda2";
-const SLOT_B: &'static str = "/dev/sda3";
+use beercade_hal::Platform;
+
+// The system boots from one of two SquashFS slots; we OTA to the *other* slot
+// and then flip the bootloader target so the active runtime is never touched
+// mid-flash. Slot devices and the bootloader mechanism come from beercade-hal.
 
 /// The payload is staged here first (on the same physical disk as the live
 /// root so we can verify free space up front) and only after a successful
@@ -27,8 +25,9 @@ const SPARE_MARGIN_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 /// BOSS `/api/v1/sync/<filename>` endpoint accepts the request.
 pub async fn execute_ota_update(boss_url: &str, filename: &str, boss_token: &str) -> Result<(), String> {
     // Safely detect A/B slots from the running environment (no mmcblk hardcodes).
-    let active_slot = get_active_slot()?;
-    let inactive_slot = if active_slot == SLOT_A { SLOT_B } else { SLOT_A };
+    let platform = Platform::detect();
+    let target = platform.active_slot().other();
+    let inactive_slot = platform.slot_device(target);
     println!("[i] OTA Update Triggered: {} -> {}", filename, inactive_slot);
 
     let url = beercade_shared::ipc::format_ota_download_url(boss_url, filename);
@@ -101,41 +100,11 @@ pub async fn execute_ota_update(boss_url: &str, filename: &str, boss_token: &str
     flash_inactive_slot(STAGING_PATH, inactive_slot)?;
 
     // 4) Make the bootloader boot the freshly flashed slot, then reboot.
-    swap_bootloader_target(inactive_slot)?;
+    platform.commit_boot_slot(target).map_err(|e| e.to_string())?;
     println!("[i] OTA applied to {}; rebooting onto the new image...", inactive_slot);
     let _ = std::process::Command::new("reboot").spawn();
 
     Ok(())
-}
-
-/// Determine which of the two SquashFS slots we are currently booted from.
-fn get_active_slot() -> Result<String, String> {
-    // 1) The kernel command line usually names the root device explicitly.
-    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if cmdline.contains(format!("root={}", SLOT_A).as_str()) {
-        return Ok(SLOT_A.to_string());
-    }
-    if cmdline.contains(format!("root={}", SLOT_B).as_str()) {
-        return Ok(SLOT_B.to_string());
-    }
-
-    // 2) Fall back to whichever slot is mounted at `/` right now.
-    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    for line in mounts.split('\n') {
-        let parts = line.split_whitespace().collect::<Vec<&str>>();
-        if parts.len() >= 2 && parts[1] == "/" {
-            if parts[0] == SLOT_A {
-                return Ok(SLOT_A.to_string());
-            }
-            if parts[0] == SLOT_B {
-                return Ok(SLOT_B.to_string());
-            }
-        }
-    }
-
-    // 3) Dev-environment fallback.
-    println!("[!] Could not determine active slot; assuming {}", SLOT_A);
-    Ok(SLOT_A.to_string())
 }
 
 /// Confirm the staging directory has room for `required` bytes (plus a safety
@@ -197,39 +166,5 @@ fn flash_inactive_slot(staging_path: &str, inactive_slot: &str) -> Result<(), St
             output.status
         ));
     }
-    Ok(())
-}
-
-/// Atomically re-point the bootloader so the next boot loads the freshly
-/// flashed slot, using U-Boot environment variables where available.
-fn swap_bootloader_target(new_slot: &str) -> Result<(), String> {
-    let slot_name = if new_slot == SLOT_B { "b" } else { "a" };
-
-    // Preferred path: persist a U-Boot env var the boot script consults.
-    let setenv = std::process::Command::new("fw_setenv")
-        .args(["raid_slot_being_flashed", slot_name])
-        .output()
-        .map_err(|e| format!("fw_setenv failed: {e}"))?;
-    if setenv.status.success() {
-        return Ok(());
-    }
-
-    // Fallback path: rewrite an extlinux boot target atomically.
-    let config_path = "/boot/extlinux/extlinux.conf";
-    if !Path::new(config_path).exists() {
-        return Err(format!(
-            "bootloader cannot be re-pointed: fw_setenv unavailable and {} missing",
-            config_path
-        ));
-    }
-    let config = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-    let temp_path = format!("{}.tmp", config_path);
-    let new_config = config
-        .replace(format!("root={}", SLOT_A).as_str(), "root=__SLOT_TEMP__")
-        .replace(format!("root={}", SLOT_B).as_str(), &format!("root={}", SLOT_A))
-        .replace("root=__SLOT_TEMP__", &format!("root={}", SLOT_B));
-    fs::write(&temp_path, new_config).map_err(|e| e.to_string())?;
-    fs::rename(temp_path, config_path).map_err(|e| e.to_string())?;
-
     Ok(())
 }

@@ -1,4 +1,3 @@
-use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
@@ -19,23 +18,14 @@ struct NodeState {
     mode: StationMode,
 }
 
-fn read_thermal_zone(zone_idx: u32) -> f32 {
-    let path = format!("/sys/class/thermal/thermal_zone{}/temp", zone_idx);
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|val| val.trim().parse::<f32>().ok())
-        .map(|millicelsius| millicelsius / 1000.0)
-        .unwrap_or(42.0)
-}
-
 fn sample_telemetry(state: &NodeState) -> NodeTelemetry {
-    let cpu_temp = read_thermal_zone(0);
-    let gpu_temp = read_thermal_zone(1);
+    let (cpu_temp, gpu_temp) = netplay::sample_temps();
+    let (hardware, soc) = beercade_hal::Platform::detect().hardware_info();
 
     NodeTelemetry {
         node_id: state.node_id.clone(),
-        hardware: "Radxa Rock 5C".to_string(),
-        soc: "Rockchip RK3588S (4x A76 + 4x A55)".to_string(),
+        hardware: hardware.to_string(),
+        soc: soc.to_string(),
         cpu_temp_c: cpu_temp,
         gpu_temp_c: gpu_temp,
         npu_load_pct: 0.0,

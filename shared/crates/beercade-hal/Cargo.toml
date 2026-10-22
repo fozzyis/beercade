@@ -1,0 +1,8 @@
+[package]
+name = "beercade-hal"
+version = "0.1.0"
+edition = "2021"
+authors = ["B.E.E.R.C.A.D.E. Team"]
+description = "Hardware abstraction for A.S.T.R.O. and B.O.S.S. on RK3588, Raspberry Pi and x86_64"
+
+[dependencies]

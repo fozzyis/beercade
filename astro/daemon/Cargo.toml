@@ -17,3 +17,4 @@ tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 sha2 = "0.10"
 beercade-shared = { path = "../../shared/crates/beercade-shared" }
+beercade-hal = { path = "../../shared/crates/beercade-hal" }

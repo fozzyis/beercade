@@ -3,5 +3,6 @@ members = [
     "boss",
     "astro/daemon",
     "shared/crates/beercade-shared",
+    "shared/crates/beercade-hal",
 ]
 resolver = "2"
