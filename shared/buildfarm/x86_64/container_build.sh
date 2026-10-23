@@ -9,13 +9,14 @@ OUT=/out
 source "$SRC/shared/buildfarm/x86_64/payloads/$PAYLOAD.conf"
 : "${HOSTNAME:=$PAYLOAD_NAME}"
 [[ -v FRONTEND_BUILDS ]] || FRONTEND_BUILDS=()
+[[ -v NATIVE_BUILDS ]] || NATIVE_BUILDS=()
 : "${IMAGE_COMPRESS:=zstd}"
 
 WORK=/work
 ROOT=$WORK/rootfs
 BIN_DIR=$OUT/bin-$PAYLOAD_NAME
 FE_DIR=$OUT/fe-$PAYLOAD_NAME
-ESP_MIB=512 ROOT_MIB=2048 DATA_MIB=256
+ESP_MIB=512 ROOT_MIB=${ROOT_MIB:-2048} DATA_MIB=256
 
 banner() { printf '\n==== %s ====\n' "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -60,6 +61,13 @@ if ((${#FRONTEND_BUILDS[@]})); then
     chown -R root:root "$ROOT$fe_dest"
   done
 fi
+
+for i in "${!NATIVE_BUILDS[@]}"; do
+  d="$OUT/native-$PAYLOAD_NAME/$i"
+  [[ -d "$d/usr" ]] || die "missing native build output $d"
+  banner "native build ${NATIVE_BUILDS[$i]}"
+  tar -C "$d" -cf - . | tar -C "$ROOT" --no-same-owner --no-overwrite-dir -xf -
+done
 
 # Users/groups from overlaid sysusers.d (pacstrap ran sysusers before the overlays).
 systemd-sysusers --root="$ROOT"

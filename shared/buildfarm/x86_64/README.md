@@ -41,6 +41,8 @@ image), DATA 256 MiB ext4. The ESP gets systemd-boot as `EFI/BOOT/BOOTX64.EFI` a
 | `PACMAN_PACKAGES` | pacstrap package list |
 | `OVERLAYS` | `src:dest` dirs copied in order. `*.local` files and `*.wants/` dirs are skipped |
 | `FRONTEND_BUILDS` | Optional. `src:build_subdir:dest` entries; built in step 1b, copied to `dest` in the rootfs |
+| `NATIVE_BUILDS` | Optional. Scripts run in `archlinux:latest` as `<script> <destdir>` (repo at `/src` ro, `/cache` = volume `beercade-x86-native-cache`); destdir is overlaid onto the rootfs |
+| `ROOT_MIB` | Optional, default 2048. Size of each root slot |
 | `IMAGE_COMPRESS` | Optional, default `zstd`; anything else skips the `.zst` |
 | `ENABLE_UNITS` | Enabled with `systemctl --root` (the only way units get enabled) |
 | `INITCPIO_DIR` | Contains `hooks/` and `install/`, copied to `/etc/initcpio/` |

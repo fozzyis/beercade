@@ -21,12 +21,14 @@ OUT_D="$(winpath "$REPO/out")"
 BIN_SUB="bin-$PAYLOAD_NAME"
 FE_SUB="fe-$PAYLOAD_NAME"
 [[ -v FRONTEND_BUILDS ]] || FRONTEND_BUILDS=()
+[[ -v NATIVE_BUILDS ]] || NATIVE_BUILDS=()
+NATIVE_SUB="native-$PAYLOAD_NAME"
 
 banner() { printf '\n==== %s ====\n' "$*"; }
 
 banner "payload $PAYLOAD_NAME -> out/$IMAGE_NAME"
-rm -rf "${REPO:?}/out/$BIN_SUB" "${REPO:?}/out/$FE_SUB"
-mkdir -p "$REPO/out/$BIN_SUB" "$REPO/out/$FE_SUB"
+rm -rf "${REPO:?}/out/$BIN_SUB" "${REPO:?}/out/$FE_SUB" "${REPO:?}/out/$NATIVE_SUB"
+mkdir -p "$REPO/out/$BIN_SUB" "$REPO/out/$FE_SUB" "$REPO/out/$NATIVE_SUB"
 
 if ((${#CARGO_PACKAGES[@]})); then
   banner "step 1: cargo release build (${CARGO_PACKAGES[*]})"
@@ -60,6 +62,14 @@ if ((${#FRONTEND_BUILDS[@]})); then
         mkdir -p "/out/$3/$4" && cp -a "$2/." "/out/$3/$4/"' _ "$fe_src" "$fe_sub" "$FE_SUB" "$i"
   done
 fi
+
+# Each entry is a script run in archlinux:latest as `<script> <destdir>`;
+# destdir (out/native-<payload>/<n>/) is overlaid onto the rootfs.
+for i in "${!NATIVE_BUILDS[@]}"; do
+  nb="${NATIVE_BUILDS[$i]}"
+  banner "step 1c: native build $nb"
+  docker run --rm     -v "$REPO_D:/src:ro"     -v "$OUT_D:/out"     -v beercade-x86-pacman-cache:/var/cache/pacman/pkg     -v beercade-x86-native-cache:/cache     archlinux:latest     bash -euo pipefail -c 'mkdir -p "/out/$2/$3" && bash "/src/$1" "/out/$2/$3"' _ "$nb" "$NATIVE_SUB" "$i"
+done
 
 banner "step 2: rootfs + image assembly (archlinux, privileged)"
 docker run --rm --privileged \
