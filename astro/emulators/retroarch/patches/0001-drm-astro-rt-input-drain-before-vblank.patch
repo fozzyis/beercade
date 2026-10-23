@@ -1,0 +1,53 @@
+--- a/gfx/drivers/drm_gfx.c
++++ b/gfx/drivers/drm_gfx.c
+@@ -39,6 +39,12 @@
+ #include "../../verbosity.h"
+ #include "../common/drm_common.h"
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++/* Beercade A.S.T.R.O. 1000 Hz evdev input ABI.  Build with -lastro_rt and
++ * -I<astro_rt>/include (or vendor libastro/include on the include path). */
++#include <astro_rt/input_events.h>
++#endif
++
+ #include "drm_pixformats.h"
+ 
+ struct modeset_buf
+@@ -741,6 +747,26 @@
+    return _drmvars;
+ }
+ 
++/* Beercade A.S.T.R.O. sub-frame input sweep.  Called from drm_frame() on the
++ * KMSDRM driver thread immediately before the blit + atomic page flip, i.e.
++ * right before VBLANK: every transition queued by the SCHED_FIFO(90) evdev
++ * producer thread is drained from the lock-free SPSC ring into the pad
++ * snapshot so input_state() answers from a timestamp the encoder stamped,
++ * not from a scheduler wake-up.  Preallocated static batch buffer: no heap,
++ * no locks, no syscalls in the hot path. */
++#ifdef HAVE_ASTRO_RT_INPUT
++static void astro_input_drain_pre_vblank(void)
++{
++   static struct astro_input_event batch[ASTRO_INPUT_DRAIN_MAX];
++
++   (void)astro_input_drain(batch, ASTRO_INPUT_DRAIN_MAX);
++}
++#else
++static void astro_input_drain_pre_vblank(void)
++{
++}
++#endif
++
+ static bool drm_frame(void *data, const void *frame, unsigned width,
+       unsigned height, uint64_t frame_count, unsigned pitch, const char *msg,
+       video_frame_info_t *video_info)
+@@ -785,6 +811,10 @@
+    menu_driver_frame(menu_is_alive, video_info);
+ #endif
+ 
++   /* Drain the 1000 Hz SPSC evdev ring right before VBLANK (see comment on
++    * astro_input_drain_pre_vblank). */
++   astro_input_drain_pre_vblank();
++
+    /* Update main surface: locate free page, blit and flip. */
+    drm_surface_update(_drmvars, frame, _drmvars->main_surface);
+    return true;
