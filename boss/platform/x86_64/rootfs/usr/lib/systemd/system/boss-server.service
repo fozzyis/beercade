@@ -1,0 +1,34 @@
+[Unit]
+Description=B.O.S.S. server
+After=network.target local-fs.target systemd-tmpfiles-setup.service
+RequiresMountsFor=/data
+
+[Service]
+Type=simple
+User=boss
+Group=boss
+WorkingDirectory=/usr/share/boss
+Environment=BOSS_HOST=0.0.0.0
+Environment=BOSS_PORT=8080
+Environment=BOSS_NETPLAY_UDP_PORT=9750
+Environment=BOSS_STATIC_DIR=/usr/share/boss/kiosk_ui
+Environment=BOSS_SYNC_DIR=/data/beercade/sync
+Environment=RUST_LOG=info
+EnvironmentFile=-/data/beercade/boss.env
+ExecStart=/usr/bin/boss-server
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/data/beercade/sync
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

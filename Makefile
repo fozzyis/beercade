@@ -3,7 +3,7 @@
 # Domains: boss | astro | website | shared
 # ==============================================================================
 
-.PHONY: all check test build-boss build-astro build-website clean image-x86 verify-x86
+.PHONY: all check test build-boss build-astro build-website clean image-x86 verify-x86 image-boss-x86 verify-boss-x86
 
 all: check test
 
@@ -54,4 +54,13 @@ image-x86:
 
 verify-x86:
 	@echo "=== Verifying x86_64 A.S.T.R.O. Image Boot (QEMU + OVMF, TCG) ==="
-	bash shared/tests/verify_qemu_x86_64.sh
+	bash shared/tests/verify_qemu_x86_64.sh astro
+
+# x86_64 B.O.S.S. image (+ .zst) and QEMU gate: services, :8080, kiosk, /data persistence, A/B switch
+image-boss-x86:
+	@echo "=== Building x86_64 B.O.S.S. Image (out/beercade-boss-x86_64.raw) ==="
+	bash shared/buildfarm/x86_64/build_image.sh boss
+
+verify-boss-x86:
+	@echo "=== Verifying x86_64 B.O.S.S. Image (QEMU + OVMF, TCG, two boots) ==="
+	bash shared/tests/verify_qemu_x86_64.sh boss

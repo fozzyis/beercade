@@ -8,10 +8,13 @@ OUT=/out
 # shellcheck source=/dev/null
 source "$SRC/shared/buildfarm/x86_64/payloads/$PAYLOAD.conf"
 : "${HOSTNAME:=$PAYLOAD_NAME}"
+[[ -v FRONTEND_BUILDS ]] || FRONTEND_BUILDS=()
+: "${IMAGE_COMPRESS:=zstd}"
 
 WORK=/work
 ROOT=$WORK/rootfs
 BIN_DIR=$OUT/bin-$PAYLOAD_NAME
+FE_DIR=$OUT/fe-$PAYLOAD_NAME
 ESP_MIB=512 ROOT_MIB=2048 DATA_MIB=256
 
 banner() { printf '\n==== %s ====\n' "$*"; }
@@ -22,7 +25,7 @@ for f in "$MKINITCPIO_CONF" "$INITCPIO_DIR" "$ESP_DIR" "$DATA_DIR"; do
 done
 
 banner "tools"
-pacman -Syu --noconfirm --needed arch-install-scripts squashfs-tools dosfstools mtools e2fsprogs util-linux >/dev/null
+pacman -Syu --noconfirm --needed arch-install-scripts squashfs-tools dosfstools mtools e2fsprogs util-linux zstd qemu-img >/dev/null
 
 banner "pacstrap: ${PACMAN_PACKAGES[*]}"
 rm -rf "$WORK"; mkdir -p "$ROOT"
@@ -45,6 +48,21 @@ for p in "${CARGO_PACKAGES[@]}"; do
   [[ -f "$BIN_DIR/$p" ]] || die "missing binary $BIN_DIR/$p"
   install -Dm0755 "$BIN_DIR/$p" "$ROOT/usr/bin/$p"
 done
+
+if ((${#FRONTEND_BUILDS[@]})); then
+  banner "frontends"
+  for i in "${!FRONTEND_BUILDS[@]}"; do
+    IFS=: read -r _ _ fe_dest <<<"${FRONTEND_BUILDS[$i]}"
+    [[ -f "$FE_DIR/$i/index.html" ]] || die "missing frontend build $FE_DIR/$i"
+    echo "  $FE_DIR/$i -> $fe_dest"
+    mkdir -p "$ROOT$fe_dest"
+    cp -r "$FE_DIR/$i/." "$ROOT$fe_dest/"
+    chown -R root:root "$ROOT$fe_dest"
+  done
+fi
+
+# Users/groups from overlaid sysusers.d (pacstrap ran sysusers before the overlays).
+systemd-sysusers --root="$ROOT"
 
 banner "units"
 systemctl --root="$ROOT" enable "${ENABLE_UNITS[@]}"
@@ -123,4 +141,13 @@ sfdisk -l "$IMG"
 
 banner "output"
 cp "$IMG" "$OUT/$IMAGE_NAME"
-ls -l "$OUT/$IMAGE_NAME"
+rm -f "$OUT/$IMAGE_NAME.zst" "$OUT/${IMAGE_NAME%.raw}.vhdx"
+if [[ "$IMAGE_COMPRESS" == zstd ]]; then
+  # Mostly-empty partitions compress to almost nothing; flash with
+  # `zstd -dc <img>.zst | dd of=/dev/sdX bs=4M`.
+  zstd -q -T0 -12 "$IMG" -o "$OUT/$IMAGE_NAME.zst"
+fi
+# Hyper-V Gen2 (Secure Boot off; the images are unsigned).
+qemu-img convert -f raw -O vhdx -o subformat=dynamic "$IMG" "$OUT/${IMAGE_NAME%.raw}.vhdx"
+(cd "$OUT" && sha256sum "$IMAGE_NAME" "$IMAGE_NAME".zst "${IMAGE_NAME%.raw}.vhdx" 2>/dev/null > "$IMAGE_NAME.sha256" || true)
+ls -l "$OUT/$IMAGE_NAME"* "$OUT/${IMAGE_NAME%.raw}.vhdx"

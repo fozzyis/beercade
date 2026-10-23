@@ -1,0 +1,41 @@
+[Unit]
+Description=B.O.S.S. touchscreen kiosk (cage + chromium on KMS)
+After=boss-server.service seatd.service systemd-user-sessions.service
+Wants=boss-server.service
+Requires=seatd.service
+# seatd takes the active VT; keep a getty off it.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=kiosk
+Group=kiosk
+SupplementaryGroups=seat video render input
+RuntimeDirectory=kiosk
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/kiosk
+Environment=HOME=/run/kiosk
+Environment=LIBSEAT_BACKEND=seatd
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=WLR_NO_HARDWARE_CURSORS=1
+# llvmpipe fallback when there is no GPU (VMs); real GPUs still get GLES.
+Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
+ExecStartPre=/bin/sh -c 'for i in $(seq 60); do curl -fsS -o /dev/null http://127.0.0.1:8080/api/health && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/bin/cage -s -- /usr/bin/chromium \
+    --kiosk \
+    --ozone-platform=wayland \
+    --no-first-run \
+    --noerrdialogs \
+    --disable-session-crashed-bubble \
+    --disable-dev-shm-usage \
+    --user-data-dir=/run/kiosk/chromium \
+    --app=http://127.0.0.1:8080
+Restart=always
+RestartSec=3
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

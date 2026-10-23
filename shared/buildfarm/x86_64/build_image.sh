@@ -19,12 +19,14 @@ mkdir -p "$REPO/out"
 REPO_D="$(winpath "$REPO")"
 OUT_D="$(winpath "$REPO/out")"
 BIN_SUB="bin-$PAYLOAD_NAME"
+FE_SUB="fe-$PAYLOAD_NAME"
+[[ -v FRONTEND_BUILDS ]] || FRONTEND_BUILDS=()
 
 banner() { printf '\n==== %s ====\n' "$*"; }
 
 banner "payload $PAYLOAD_NAME -> out/$IMAGE_NAME"
-rm -rf "${REPO:?}/out/$BIN_SUB"
-mkdir -p "$REPO/out/$BIN_SUB"
+rm -rf "${REPO:?}/out/$BIN_SUB" "${REPO:?}/out/$FE_SUB"
+mkdir -p "$REPO/out/$BIN_SUB" "$REPO/out/$FE_SUB"
 
 if ((${#CARGO_PACKAGES[@]})); then
   banner "step 1: cargo release build (${CARGO_PACKAGES[*]})"
@@ -43,6 +45,22 @@ if ((${#CARGO_PACKAGES[@]})); then
       ls -l "/out/$BIN_SUB"' _ "${CARGO_PACKAGES[@]}"
 fi
 
+# Each entry src:build_subdir:dest; output lands in out/fe-<payload>/<n>/ and
+# container_build.sh copies it to dest. The source tree is copied without
+# node_modules/build so the Windows checkout is never written to.
+if ((${#FRONTEND_BUILDS[@]})); then
+  for i in "${!FRONTEND_BUILDS[@]}"; do
+    IFS=: read -r fe_src fe_sub _ <<<"${FRONTEND_BUILDS[$i]}"
+    banner "step 1b: frontend build $fe_src"
+    docker run --rm       -v "$REPO_D:/src:ro"       -v "$OUT_D:/out"       -v beercade-x86-npm-cache:/root/.npm       node:22-bookworm       bash -euo pipefail -c '
+        mkdir -p /build
+        tar -C "/src/$1" --exclude=node_modules --exclude=.svelte-kit --exclude="./$2" -cf - . | tar -C /build -xf -
+        cd /build && npm ci --no-audit --no-fund && npm run build
+        [[ -f "$2/index.html" ]] || { echo "no $2/index.html" >&2; exit 1; }
+        mkdir -p "/out/$3/$4" && cp -a "$2/." "/out/$3/$4/"' _ "$fe_src" "$fe_sub" "$FE_SUB" "$i"
+  done
+fi
+
 banner "step 2: rootfs + image assembly (archlinux, privileged)"
 docker run --rm --privileged \
   -v "$REPO_D:/src:ro" \
@@ -53,4 +71,4 @@ docker run --rm --privileged \
   bash /src/shared/buildfarm/x86_64/container_build.sh
 
 banner "done"
-ls -l "$REPO/out/$IMAGE_NAME"
+ls -l "$REPO/out/$IMAGE_NAME"*

@@ -36,7 +36,7 @@ The website (Cloudflare Pages) is out of scope here; CI only type-checks it.
 | M0 | Hardware abstraction (`beercade-hal`) | Done | Opus |
 | M1 | CI: build + test on every push | Done (x86_64); arm64 parked | Sonnet |
 | M2 | A.S.T.R.O. x86_64 bootable image | Done | Opus + Sonnet |
-| M2b | B.O.S.S. x86_64 bootable image | Next | Sonnet, Opus review |
+| M2b | B.O.S.S. x86_64 bootable image | Done | Opus |
 | M3 | A.S.T.R.O. PC runtime: GPUs, emulators, latency | After M2 | Opus |
 | M4 | Path ownership rules and lint | Any time | Haiku |
 | M5 | End-to-end acceptance: A.S.T.R.O. → B.O.S.S. → cloud ingest | Last | Sonnet |
@@ -85,18 +85,45 @@ Notes for later milestones:
 - Not CI-gated yet: the build needs `--privileged` and ~5 GB, and TCG boot
   takes ~4–5 min. Candidate for a manual/nightly job on the laptop runner.
 - `boss-static-net.service` from `astro/rootfs` is copied but not enabled.
-- Image is 4.75 GiB raw (sparse partitions); compress for distribution in M2b.
+- Image is 4.75 GiB raw (sparse partitions); M2b added `.zst` and `.vhdx` outputs.
 
-### M2b — B.O.S.S. x86_64 image
-Same assembler, different payload.
-- `boss-server`, built `boss/kiosk_ui`, `boss-server.service`,
-  `boss-kiosk.service` (cage + chromium direct to KMS, seatd), static
-  networking.
-- No emulators, no latency tuning.
-- B.O.S.S. state (database, tokens, bookings, OTA payloads) on `/data`.
-- **Gate:** boots in QEMU; `boss-server` answers on :8080; kiosk service
-  starts; data written to `/data` survives a reboot; an A/B slot switch with
-  `bootctl` boots the other slot.
+### M2b — B.O.S.S. x86_64 image (done)
+`make image-boss-x86` → `out/beercade-boss-x86_64.raw` (4.75 GiB raw, squashfs
+root ~590 MiB, mostly Chromium), `.raw.zst` (~1.24 GiB), `.vhdx` (~1.4 GiB),
+`.raw.sha256`. `make verify-boss-x86` passes (two TCG boots, ~7.5 min).
+- Payload `payloads/boss.conf`; platform files in `boss/platform/x86_64/`
+  (units, sysusers/tmpfiles, static network, fstab, loader entries, DATA seed).
+  Reuses the astro initcpio hook and mkinitcpio config (image-agnostic).
+- Assembler additions (astro unaffected): `FRONTEND_BUILDS` (node:22 build of
+  `boss/kiosk_ui` → `/usr/share/boss/kiosk_ui`), `systemd-sysusers` after the
+  overlays, `.zst` + `.vhdx` + sha256 for every payload.
+- `boss-server.service`: user `boss`, `BOSS_PORT=8080` (the code default stays
+  8989 for ARM/Docker; nodes and the website expect `boss.lan:8080`), tokens
+  and overrides from `EnvironmentFile=-/data/beercade/boss.env` (example in
+  DATA), state in `/data/beercade/sync`, `ProtectSystem=strict`.
+- `boss-kiosk.service`: user `kiosk` (groups seat/video/render/input), seatd,
+  `cage -s -- chromium --kiosk --ozone-platform=wayland`, waits for
+  `/api/health`. `WLR_RENDERER_ALLOW_SOFTWARE=1` for GPU-less VMs. Takes tty1
+  (conflicts with `getty@tty1`).
+- Network: static `192.168.100.10/24`, gateway/DNS `192.168.100.1`, mDNS on.
+- Gate: `verify_qemu_x86_64.sh boss`. Boot 1 (slot A): multi-user, seatd,
+  boss-server, boss-kiosk active, `/api/health` = ok, `/` = 200, one cage
+  process, zero kiosk restarts; writes a nonce to `/data`, `bootctl
+  set-default beercade-slot-b.conf` (checked via the `LoaderEntryDefault` EFI
+  var), reboots. Boot 2: same checks, `root=PARTLABEL=ROOT_B`, nonce present.
+  OVMF vars and the snapshot disk live for the whole QEMU process.
+- Hyper-V: the initramfs includes `hv_vmbus hv_storvsc hyperv_keyboard`.
+  Hyper-V Generation 2 VMs need Secure Boot off (images are unsigned):
+  `New-VM -Generation 2 -VHDPath out\<image>.vhdx`, `Set-VMFirmware
+  -EnableSecureBoot Off`. Not exercised by the QEMU gates.
+
+Notes for later milestones:
+- M5: B.O.S.S. answers on :8080 at 192.168.100.10; `boss.lan` needs DNS on the
+  venue router (avahi publishes `boss.local`). The x86 A.S.T.R.O. image
+  hard-codes 192.168.100.2, so two x86 nodes on one LAN clash.
+- `beercade-hal` slot switching works with this layout; nothing marks a slot
+  good/bad yet (no boot counting).
+- The kiosk runs unaccelerated in QEMU; real GPUs need the M3 driver work.
 
 ### M3 — A.S.T.R.O. PC runtime
 - Build the project's modified RetroArch (it carries the
