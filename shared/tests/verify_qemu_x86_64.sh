@@ -41,8 +41,8 @@ case "$PAYLOAD" in
 astro)
   TIMEOUT="${VERIFY_TIMEOUT:-300}" MEM=2048
   FAIL_RE="$FAIL_RE|Failed to start astro-daemon|astro-daemon\.service: Failed|astro-daemon\.service: Main process exited"
-  CHECK[0]='echo "VERIFY $(systemctl is-active multi-user.target astro-daemon.service | paste -sd,) END"'
-  EXPECT[0]='VERIFY active,active END'
+  CHECK[0]='echo "VERIFY $(systemctl is-active multi-user.target astro-tune.service astro-daemon.service | paste -sd,) ra=$(retroarch --version >/dev/null 2>&1 && echo ok) cores=$(ls /usr/lib/libretro/*_libretro.so 2>/dev/null | wc -l | awk "{print (\$1>=10)?\"ok\":\$1}") END"'
+  EXPECT[0]='VERIFY active,active,active ra=ok cores=ok END'
   ;;
 boss)
   TIMEOUT="${VERIFY_TIMEOUT:-1200}" MEM=3072

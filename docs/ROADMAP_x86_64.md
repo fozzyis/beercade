@@ -37,7 +37,7 @@ The website (Cloudflare Pages) is out of scope here; CI only type-checks it.
 | M1 | CI: build + test on every push | Done (x86_64); arm64 parked | Sonnet |
 | M2 | A.S.T.R.O. x86_64 bootable image | Done | Opus + Sonnet |
 | M2b | B.O.S.S. x86_64 bootable image | Done | Opus |
-| M3 | A.S.T.R.O. PC runtime: GPUs, emulators, latency | After M2 | Opus |
+| M3 | A.S.T.R.O. PC runtime: GPUs, emulators, latency | Built; hardware gate open | Opus + Sonnet |
 | M4 | Path ownership rules and lint | Any time | Haiku |
 | M5 | End-to-end acceptance: A.S.T.R.O. → B.O.S.S. → cloud ingest | Last | Sonnet |
 
@@ -125,19 +125,48 @@ Notes for later milestones:
   good/bad yet (no boot counting).
 - The kiosk runs unaccelerated in QEMU; real GPUs need the M3 driver work.
 
-### M3 — A.S.T.R.O. PC runtime
-- Build the project's modified RetroArch (it carries the
-  `astro_input_drain_pre_vblank` hook) and `astro/rt` (C++ evdev input) for
-  x86_64. Stock Arch RetroArch lacks the hook and is not a substitute.
-  Mesa and ES-DE can come from Arch packages.
-- GPU support and boot-time driver selection: AMD, NVIDIA (`nvidia-open`),
-  Intel. Fix the KMS launcher's card probe and `SDL_VIDEODRIVER` (`kmsdrm`).
-- Latency tuning as systemd units (CPU governor, PM QoS, `AllowedCPUs=`
-  slices), core counts from `beercade-hal`, not hard-coded.
-- Emulator core set for x86_64.
-- **Gate:** frame-time measurement with
-  `astro/emulators/benchmarks/benchmark_frametimes.py` on real hardware for at
-  least one AMD, one NVIDIA and one Intel machine. QEMU numbers don't count.
+### M3 — A.S.T.R.O. PC runtime (built; hardware gate open)
+`make image-x86` → `out/beercade-astro-x86_64.raw` (8.75 GiB raw: root slots
+grew to 4 GiB; squashfs 1302 MiB, `.zst` 2.6 GiB, `.vhdx` 2.8 GiB).
+`make verify-x86` passes: `astro-tune`, `astro-daemon` active, the patched
+RetroArch runs, ≥10 libretro cores installed.
+- **RetroArch**: the fork lived only as an unversioned copy in
+  `.ai-ignore/archive/beercade-input-audio`. Its one change (the `drm_gfx.c`
+  hook) is now `astro/emulators/retroarch/patches/0001-*.patch` against
+  upstream v1.22.2. `astro/emulators/retroarch/build_x86_64.sh` builds
+  `astro/rt` + RetroArch (`-march=x86-64-v2`, KMS/plain DRM/EGL/GL/Vulkan,
+  udev, ALSA, SDL2; no X11/Wayland/Pulse) as an assembler `NATIVE_BUILDS`
+  step and checks the hook is linked.
+- **Config**: `astro/platform/x86_64/rootfs/root/.config/retroarch/retroarch.cfg`
+  replaces the RK3588 one (which had `audio_driver = "null"` and the RK DP
+  audio device): Vulkan `khr_display`, ALSA default device, udev input,
+  saves/states/BIOS/ROMs under `/data/beercade`.
+- **GPUs**: `mesa vulkan-radeon vulkan-intel nvidia-open nvidia-utils
+  linux-firmware`; nouveau blacklisted, `nvidia_drm modeset=1 fbdev=1`
+  (`astro/platform/x86_64/rootfs/etc/modprobe.d/beercade-gpu.conf`, notes in
+  `astro/platform/x86_64/gpu.md`). The KMS launcher probes for the card with
+  a connected output (skipping simpledrm/efifb), sets `SDL_VIDEODRIVER=kmsdrm`,
+  `SDL_KMSDRM_DEVICE_INDEX`, and NVIDIA's GBM backend; `ASTRO_DEV` overrides.
+- **Latency**: `astro-tune` (`astro/tune`, started before `astro-daemon`):
+  `performance` governor/EPP, `AllowedCPUs` via `systemctl set-property
+  --runtime` — `astro-rt.slice` gets `beercade-hal`'s realtime set, `system`
+  / `user` slices and `init.scope` the rest — and holds
+  `/dev/cpu_dma_latency` = 0. Latency-critical units join with
+  `Slice=astro-rt.slice`.
+- **Cores**: Arch `libretro-*` packages, see
+  `astro/emulators/cores/cores_x86_64.md`.
+
+Open (needs decisions or hardware):
+- **Gate not run**: frame-time measurement on real AMD, NVIDIA and Intel
+  machines with `benchmark_frametimes.py`. Only QEMU boots are verified.
+- **No frontend**: ES-DE is AUR-only, not in Arch repos; nothing launches
+  RetroArch at boot yet.
+- **Input hook is inert**: it drains the astro_rt ring and discards the
+  events; nothing starts the astro_rt producer; and it lives in the plain
+  `drm` driver while the config uses Vulkan. Parity with ARM, which is the same.
+- **Missing cores**: FBNeo, DuckStation, PCSX2 are not packaged in Arch.
+- `astro/rt/deploy` udev/limits rules are RK3588-specific (rockchipdp0 audio)
+  and not installed on x86.
 
 ### M4 — Path ownership
 CODEOWNERS and a lint that keeps platform-specific files inside
