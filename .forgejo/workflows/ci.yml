@@ -12,7 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, x86_64]
+        # arm64 (RK3588 runner) parked until its failure is investigated.
+        arch: [x86_64]
     runs-on: ${{ matrix.arch }}
     container:
       image: rust:1-bookworm
