@@ -1,0 +1,9 @@
+[package]
+name = "astro-tune"
+version = "0.1.0"
+edition = "2021"
+authors = ["B.E.E.R.C.A.D.E. Team"]
+description = "Boot-time latency tuning for A.S.T.R.O.: CPU governor, PM QoS, CPU partitioning"
+
+[dependencies]
+beercade-hal = { path = "../../shared/crates/beercade-hal" }
