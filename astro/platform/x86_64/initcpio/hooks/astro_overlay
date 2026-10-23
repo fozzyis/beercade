@@ -1,0 +1,36 @@
+#!/usr/bin/ash
+
+run_hook() {
+    # shellcheck disable=SC2034
+    mount_handler=astro_mount_handler
+}
+
+astro_fail() {
+    err "astro_overlay: $1"
+    echo "You are being dropped into a recovery shell."
+    launch_interactive_shell
+    exit 1
+}
+
+astro_mount_handler() {
+    newroot=$1
+    lower=/run/astro/lower
+    rw=/run/astro/rw
+
+    [ -n "$root" ] || astro_fail "no root= on the kernel command line"
+
+    dev=$(resolve_device "$root" "${rootdelay:-10}")
+    [ -n "$dev" ] || astro_fail "root device '$root' not found"
+
+    mkdir -p "$lower" "$rw" || astro_fail "cannot create /run/astro"
+
+    mount -t "${rootfstype:-squashfs}" -o ro "$dev" "$lower" ||
+        astro_fail "cannot mount $dev on $lower"
+
+    mount -t tmpfs -o mode=0755 tmpfs "$rw" ||
+        astro_fail "cannot mount tmpfs on $rw"
+    mkdir -p "$rw/upper" "$rw/work" || astro_fail "cannot create overlay dirs"
+
+    mount -t overlay -o "lowerdir=$lower,upperdir=$rw/upper,workdir=$rw/work" overlay "$newroot" ||
+        astro_fail "cannot mount overlay on $newroot"
+}

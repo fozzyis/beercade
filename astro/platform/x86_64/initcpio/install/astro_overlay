@@ -1,0 +1,14 @@
+#!/bin/bash
+
+build() {
+    add_module squashfs
+    add_module overlay
+    add_runscript
+}
+
+help() {
+    cat <<HELPEOF
+Mounts the squashfs root= read-only, a tmpfs at /run/astro/rw for writes,
+and an overlay of both as the new root (A.S.T.R.O. x86_64 image).
+HELPEOF
+}

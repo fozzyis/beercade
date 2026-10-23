@@ -3,7 +3,7 @@
 # Domains: boss | astro | website | shared
 # ==============================================================================
 
-.PHONY: all check test build-boss build-astro build-website clean
+.PHONY: all check test build-boss build-astro build-website clean image-x86 verify-x86
 
 all: check test
 
@@ -46,3 +46,12 @@ build-website:
 clean:
 	@echo "=== Cleaning Build Artifacts ==="
 	cargo clean
+
+# x86_64 A.S.T.R.O. bootable image (Docker) and QEMU boot verification
+image-x86:
+	@echo "=== Building x86_64 A.S.T.R.O. Image (out/beercade-astro-x86_64.raw) ==="
+	bash shared/buildfarm/x86_64/build_image.sh astro
+
+verify-x86:
+	@echo "=== Verifying x86_64 A.S.T.R.O. Image Boot (QEMU + OVMF, TCG) ==="
+	bash shared/tests/verify_qemu_x86_64.sh

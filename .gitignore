@@ -32,3 +32,6 @@ astro/rootfs/usr/local/bin/astro-daemon
 
 # Local copies holding real credentials
 *.local
+
+# x86_64 image build outputs (shared/buildfarm/x86_64)
+/out/

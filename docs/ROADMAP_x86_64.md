@@ -35,8 +35,8 @@ The website (Cloudflare Pages) is out of scope here; CI only type-checks it.
 |---|---|---|---|
 | M0 | Hardware abstraction (`beercade-hal`) | Done | Opus |
 | M1 | CI: build + test on every push | Done (x86_64); arm64 parked | Sonnet |
-| M2 | A.S.T.R.O. x86_64 bootable image | Next | Opus + Sonnet |
-| M2b | B.O.S.S. x86_64 bootable image | After M2 | Sonnet, Opus review |
+| M2 | A.S.T.R.O. x86_64 bootable image | Done | Opus + Sonnet |
+| M2b | B.O.S.S. x86_64 bootable image | Next | Sonnet, Opus review |
 | M3 | A.S.T.R.O. PC runtime: GPUs, emulators, latency | After M2 | Opus |
 | M4 | Path ownership rules and lint | Any time | Haiku |
 | M5 | End-to-end acceptance: A.S.T.R.O. → B.O.S.S. → cloud ingest | Last | Sonnet |
@@ -59,15 +59,33 @@ release build plus website and kiosk type checks (Node 22).
 Open item: the arm64 job failed on its first run and is parked; logs not yet
 reviewed. Suspect: the timing-sensitive netplay loopback test.
 
-### M2 — A.S.T.R.O. x86_64 image
-Shared image assembler (reused by M2b) plus the A.S.T.R.O. image.
-- Build runs in Docker on the laptop; partitions built as files, no loop devices.
-- Minimal Arch rootfs via pacstrap; `astro-daemon` + systemd unit.
-- Generic initramfs (no autodetect) with an overlay hook that mounts the
-  squashfs root read-only under a tmpfs overlay.
-- systemd-boot, per-slot kernel and initramfs on the ESP.
-- **Gate:** `make image-x86` produces the image; an automated QEMU (UEFI)
-  boot reaches multi-user.target with `astro-daemon.service` active.
+### M2 — A.S.T.R.O. x86_64 image (done)
+`make image-x86` → `out/beercade-astro-x86_64.raw` (4.75 GiB raw; squashfs
+root ~283 MiB). `make verify-x86` boots it under QEMU/OVMF (TCG) and passes.
+- Assembler: `shared/buildfarm/x86_64/` (`build_image.sh` on the host,
+  `container_build.sh` in `archlinux:latest`). Payload-driven:
+  `payloads/astro.conf` lists cargo packages, pacman packages, overlays, units
+  to enable, initcpio/ESP/DATA sources. M2b adds `payloads/boss.conf`. Docker
+  volumes cache cargo and pacman; partitions are built as files and `dd`'d in.
+- Boot platform: `astro/platform/x86_64/` — `astro_overlay` initcpio hook
+  (squashfs at `/run/astro/lower`, tmpfs upper at `/run/astro/rw`),
+  `mkinitcpio.conf` (no autodetect), systemd-boot loader + slot entries,
+  `fstab`, `astro-daemon.service`, initial `DATA` contents.
+- Overlays skip `*.local` (real credentials) and `*.wants/` (committed from
+  Windows as plain files, not symlinks); units are enabled from the payload.
+- Gate: `shared/tests/verify_qemu_x86_64.sh`. systemd stops printing status
+  once a getty owns the serial console, so the script passes a test-only root
+  autologin drop-in for `serial-getty@ttyS0` as an SMBIOS systemd credential
+  and checks `systemctl is-active multi-user.target astro-daemon.service`.
+
+Notes for later milestones:
+- Root's password is locked; tty1 autologins as root (from `astro/rootfs`).
+  systemd accepts credentials from SMBIOS, so anything controlling the
+  firmware tables can inject units — fine for a kiosk, revisit for hardening.
+- Not CI-gated yet: the build needs `--privileged` and ~5 GB, and TCG boot
+  takes ~4–5 min. Candidate for a manual/nightly job on the laptop runner.
+- `boss-static-net.service` from `astro/rootfs` is copied but not enabled.
+- Image is 4.75 GiB raw (sparse partitions); compress for distribution in M2b.
 
 ### M2b — B.O.S.S. x86_64 image
 Same assembler, different payload.
