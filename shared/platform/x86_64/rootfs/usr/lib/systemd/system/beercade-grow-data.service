@@ -1,0 +1,18 @@
+[Unit]
+Description=Grow the DATA partition to fill the disk
+# The root is an overlay, so systemd-repart can't find the disk on its own;
+# point it at the disk that holds DATA. The filesystem is grown by
+# x-systemd.growfs on the /data mount. A no-op once DATA fills the disk.
+DefaultDependencies=no
+Requires=dev-disk-by\x2dpartlabel-DATA.device
+After=dev-disk-by\x2dpartlabel-DATA.device
+Before=data.mount local-fs-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'exec systemd-repart --dry-run=no --definitions=/usr/lib/beercade/repart.d "/dev/$(lsblk -no PKNAME /dev/disk/by-partlabel/DATA)"'
+
+[Install]
+WantedBy=local-fs.target
