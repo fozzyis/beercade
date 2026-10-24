@@ -835,9 +835,12 @@ pub struct RollbackSession<C: DeterministicCore> {
     rollbacks: u64,
     frames_simulated: u64,
     hash_cross_checks: u64,
-    /// Frames below this index carry pre-transfer (divergent) hashes that
-    /// must never be advertised or cross-checked (set by hard resync).
-    hash_floor: u32,
+    /// Frames below this index are pre-transfer (divergent) history, set by
+    /// a hard resync: their hashes are never advertised or cross-checked and
+    /// late remote inputs for them are ignored (the host's state already
+    /// includes them; rolling back into them would replay frames this
+    /// cabinet never simulated).
+    resync_floor: u32,
     health: HealthState,
     reason: String,
     boss_url: Option<String>,
@@ -881,7 +884,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
             rollbacks: 0,
             desync_events: 0,
             hash_cross_checks: 0,
-            hash_floor: 0,
+            resync_floor: 0,
             frozen: false,
             thermal_hold: false,
             frozen_since_ms: 0,
@@ -1080,6 +1083,17 @@ impl<C: DeterministicCore> RollbackSession<C> {
             self.begin_hard_resync().await;
             return;
         };
+        let missing = (target..self.current_frame).find(|&f| self.history.slot(f).is_none());
+        if let Some(gap) = missing {
+            warn!(
+                target,
+                gap,
+                current = self.current_frame,
+                "rollback range has a frame missing from history; escalating"
+            );
+            self.begin_hard_resync().await;
+            return;
+        }
         if let Err(e) = self.core.load(&src) {
             error!(error = %e, "rollback state load failed");
             self.begin_hard_resync().await;
@@ -1087,20 +1101,20 @@ impl<C: DeterministicCore> RollbackSession<C> {
         }
         for f in target..self.current_frame {
             let (local, remote_known) = {
-                let slot = self.history.slot_mut(f).expect("slot within ring");
+                let slot = self.history.slot_mut(f).expect("checked before load");
                 (slot.local_input, slot.remote_input)
             };
             let remote = remote_known.unwrap_or(self.remote_last_input);
             let pair = if self.cfg.local_player == 0 { [local, remote] } else { [remote, local] };
             let pre_state = {
-                let slot = self.history.slot_mut(f).expect("slot within ring");
+                let slot = self.history.slot_mut(f).expect("checked before load");
                 &mut slot.pre_state
             };
             let _ = self.core.save(pre_state);
             self.core.advance(pair);
             let n = self.core.save(&mut self.scratch);
             let hash = crc32(&self.scratch[..n]);
-            let slot = self.history.slot_mut(f).expect("slot within ring");
+            let slot = self.history.slot_mut(f).expect("checked before load");
             slot.post_hash = hash;
             slot.predicted = remote_known.is_none();
         }
@@ -1188,6 +1202,9 @@ impl<C: DeterministicCore> RollbackSession<C> {
             if frame >= now {
                 // Early arrival: queue for the frame clock to catch up.
                 self.remote_future.insert(frame, input);
+            } else if frame < self.resync_floor {
+                // Pre-transfer frame: already folded into the host's state.
+                continue;
             } else if let Some(slot) = self.history.slot_mut(frame) {
                 match slot.remote_input {
                     None => {
@@ -1227,7 +1244,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
         // fully confirmed inputs at hash_frame (never against predictions),
         // only above the hash floor (pre-transfer history is exempt), and
         // never while frozen (the local history is about to be replaced).
-        if hash_confirmed && hash_frame >= self.hash_floor && !self.frozen {
+        if hash_confirmed && hash_frame >= self.resync_floor && !self.frozen {
             if let Some(our) = self.history.confirmed_hash_at(hash_frame) {
                 self.hash_cross_checks += 1;
                 if our != hash {
@@ -1380,7 +1397,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
                 // Hashes below G come from the divergent pre-transfer
                 // simulation: quarantine them (INV-5 fail-visible without
                 // spurious re-escalation).
-                self.hash_floor = g;
+                self.resync_floor = g;
                 let capture: VecDeque<InputWord> = self
                     .local_pending
                     .drain(..)
@@ -1435,7 +1452,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
         let mut probe = frame;
         let mut slot_info: Option<(u32, u32, bool)> = None;
         while probe + 24 > frame {
-            if probe < self.hash_floor {
+            if probe < self.resync_floor {
                 break; // stale pre-transfer history: never advertise
             }
             if let Some(slot) = self.history.slot(probe) {
@@ -1875,7 +1892,11 @@ mod tests {
 
         let sess_a = RollbackSession::new(cfg_a, sa, SyntheticCore::default(), test_input(0), None);
         let sess_b = RollbackSession::new(cfg_b, sb, SyntheticCore::default(), test_input(1), None);
+        // A starts ~40 frames ahead so it has always simulated (predicted)
+        // the frames B's first unsuppressed window covers; started together,
+        // scheduler jitter could leave A behind B and nothing to roll back.
         let h_a = tokio::spawn(sess_a.run(rx_a));
+        tokio::time::sleep(Duration::from_millis(20)).await;
         let h_b = tokio::spawn(sess_b.run(rx_b));
 
         tokio::time::sleep(Duration::from_millis(1_200)).await;
@@ -1902,6 +1923,71 @@ mod tests {
         // (a watchdog kill would have set a different end reason).
         assert_eq!(out_a.end_reason, "shutdown signal");
         assert_eq!(out_b.end_reason, "shutdown signal");
+    }
+
+    /// Guest session driven by hand (no run loop, no timing): the peer
+    /// address is an unused loopback port, outbound packets go nowhere.
+    async fn manual_guest() -> RollbackSession<SyntheticCore> {
+        let sock = Arc::new(UdpSocket::bind(("127.0.0.1", 0)).await.unwrap());
+        let peer = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let unused = peer.local_addr().unwrap().port();
+        let cfg = cfg_for(sock.local_addr().unwrap().port(), unused, 1, false);
+        RollbackSession::new(cfg, sock, SyntheticCore::with_acc(1), test_input(1), None)
+    }
+
+    /// Regression: after a hard resync to host frame G, a late remote input
+    /// for a frame simulated before the freeze used to start a rollback from
+    /// that stale slot and panic replaying the frames skipped while frozen
+    /// ("slot within ring"). Stale inputs must be ignored; inputs at or
+    /// above G must still roll back normally.
+    #[tokio::test]
+    async fn late_input_below_resync_frame_is_ignored() {
+        let mut s = manual_guest().await;
+        for _ in 0..10 {
+            s.frame_tick().await; // frames 0..9, remote predicted
+        }
+        s.begin_hard_resync().await;
+        assert!(s.frozen);
+        for _ in 0..20 {
+            s.frame_tick().await; // frozen: clock runs, no history
+        }
+        // Host state at G = 20 arrives in one chunk.
+        let g = 20;
+        let host_state = 99u64.to_le_bytes().to_vec();
+        s.on_state_chunk(7, g, 0, 1, host_state).await;
+        assert!(!s.frozen);
+        assert_eq!(s.current_frame, g);
+        for _ in 0..5 {
+            s.frame_tick().await; // frames 20..24
+        }
+
+        // Late inputs for frames 5..8: pre-transfer, must not roll back.
+        s.on_input(5, &[0x55; 4], 0, 0, false).await;
+        assert_eq!(s.rollbacks, 0);
+        assert_eq!(s.desync_events, 0);
+        assert!(!s.frozen);
+
+        // Inputs for frames 21..22 are current: normal rollback.
+        s.on_input(21, &[0x77; 2], 0, 0, false).await;
+        assert_eq!(s.rollbacks, 1);
+        assert!(!s.frozen);
+        assert_eq!(s.current_frame, g + 5);
+    }
+
+    /// A rollback whose replay range has a hole escalates to a hard resync
+    /// before touching the core, instead of panicking mid-replay.
+    #[tokio::test]
+    async fn rollback_with_history_gap_escalates() {
+        let mut s = manual_guest().await;
+        for _ in 0..10 {
+            s.frame_tick().await;
+        }
+        let acc_before = s.core.acc();
+        s.history.slot_mut(5).unwrap().occupied = false;
+        s.on_input(3, &[0x33], 0, 0, false).await;
+        assert!(s.frozen, "gap must escalate to a hard resync");
+        assert_eq!(s.rollbacks, 0);
+        assert_eq!(s.core.acc(), acc_before, "core must not be rewound");
     }
 
     /// Hard desync: cabinets boot with different core seeds. The first
