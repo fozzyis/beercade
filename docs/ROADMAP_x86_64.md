@@ -57,7 +57,14 @@ label `x86_64`) and the RK3588 runner (label `arm64`). Rust check, test and
 release build plus website and kiosk type checks (Node 22).
 
 Open item: the arm64 job failed on its first run and is parked; logs not yet
-reviewed. Suspect: the timing-sensitive netplay loopback test.
+reviewed. The x86 job showed the likely cause intermittently: after a hard
+resync to host frame G, a late remote input for a pre-freeze frame started a
+rollback that replayed frames the guest never simulated and panicked
+(`netplay.rs`, "slot within ring"). Fixed 2026-10-24: inputs below the resync
+frame are ignored, and a rollback with a gap in its replay range escalates to
+a hard resync instead of panicking; two deterministic regression tests. The
+convergence test also gives cabinet A a 20 ms head start so it always has
+predicted frames to roll back. Re-enable arm64 to confirm.
 
 ### M2 — A.S.T.R.O. x86_64 image (done)
 `make image-x86` → `out/beercade-astro-x86_64.raw` (4.75 GiB raw; squashfs
