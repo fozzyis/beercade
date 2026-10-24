@@ -1,0 +1,38 @@
+[Unit]
+Description=A.S.T.R.O. frontend (ES-DE on KMS, tty1)
+After=astro-tune.service systemd-user-sessions.service local-fs.target
+RequiresMountsFor=/data
+# The frontend owns tty1; if it keeps crashing, give the console back.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+OnFailure=getty@tty1.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Root for DRM master and evdev on the cabinet, as on ARM. RetroArch is
+# started by ES-DE and reads /root/.config/retroarch/retroarch.cfg.
+User=root
+Slice=astro-rt.slice
+WorkingDirectory=/data/beercade
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+# RetroArch and ES-DE are built for x86-64-v3; skip (not crash-loop) below it.
+ExecCondition=/bin/sh -c 'for f in avx2 fma bmi2 movbe; do grep -qw $f /proc/cpuinfo || { echo "astro-frontend: CPU lacks $f, x86-64-v3 required" >&2; exit 1; }; done'
+# The root is tmpfs over squashfs: keep shader caches on /data so games don't
+# recompile shaders every boot. RetroArch inherits these from ES-DE.
+Environment=XDG_CACHE_HOME=/data/beercade/cache
+Environment=MESA_SHADER_CACHE_DIR=/data/beercade/cache/mesa
+Environment=__GL_SHADER_DISK_CACHE_PATH=/data/beercade/cache/nvidia
+Environment=__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
+ExecStart=/bin/sh /usr/lib/beercade/astro_kms_launcher.sh /usr/bin/es-de --home /data/beercade --no-splash
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

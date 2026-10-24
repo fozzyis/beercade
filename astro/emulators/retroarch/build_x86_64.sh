@@ -8,8 +8,9 @@ DEST="$1"
 RA_TAG=v1.22.2
 SRC=/src
 CACHE=/cache
-# x86-64-v2 (SSE4.2, 2009+) keeps older cabinet PCs bootable; no AVX2 assumed.
-ARCH_FLAGS="-march=x86-64-v2 -mtune=generic"
+# Cabinet CPU floor is x86-64-v3 (AVX2/FMA/BMI2: Intel Haswell 2013+, AMD
+# Zen). astro-frontend.service refuses to start on anything older.
+ARCH_FLAGS="-march=x86-64-v3 -mtune=generic"
 
 pacman -Syu --noconfirm --needed base-devel git cmake pkgconf \
   mesa libdrm libglvnd vulkan-headers vulkan-icd-loader alsa-lib systemd-libs \

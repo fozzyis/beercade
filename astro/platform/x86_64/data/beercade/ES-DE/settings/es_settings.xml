@@ -1,0 +1,3 @@
+<?xml version="1.0"?>
+<string name="ROMDirectory" value="/data/beercade/roms" />
+<bool name="VideoHardwareDecoding" value="true" />
