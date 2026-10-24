@@ -56,6 +56,13 @@ masked, locale C.UTF-8 / timezone UTC, `/etc/resolv.conf` points to the resolved
 stub, `/data` exists as mountpoint. `systemd-sysusers` runs after the overlays, so
 an overlaid `sysusers.d` file creates its users in the image.
 
+`shared/platform/x86_64/rootfs` is overlaid by every payload: first-boot DATA
+growth (`beercade-grow-data.service`, `systemd-repart` against the disk holding
+DATA; the filesystem grows via `x-systemd.growfs` in each payload's fstab).
+
+Compiled code (`NATIVE_BUILDS`) targets x86-64-v3 (AVX2); QEMU gates use
+`-cpu max`.
+
 Payloads: `astro.conf` (A.S.T.R.O. node), `boss.conf` (B.O.S.S. server + kiosk,
 platform files in `boss/platform/x86_64/`; reuses the astro initcpio hook and
 mkinitcpio config, which are image-agnostic).
