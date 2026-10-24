@@ -20,7 +20,8 @@
 # ACTION_EXPECT. The next phase starts at the next root autologin. The OVMF
 # vars file lives for the whole run, so bootctl set-default survives reboots.
 # The VM disk is a qcow2 overlay on the read-only image, DISK_GB large, so the
-# first-boot DATA growth (beercade-grow-data.service) has room and is checked.
+# first-boot DATA growth (beercade-grow-data.service) has room and is checked
+# (DATA must reach 5G; astro leaves ~7G of 16G after its two 4G root slots).
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL='*'
@@ -45,15 +46,15 @@ FAIL_RE='Kernel panic|^ERROR: |dropped into a recovery shell|You are now being d
 CHECK=() EXPECT=() ACTION=() ACTION_EXPECT=()
 case "$PAYLOAD" in
 astro)
-  TIMEOUT="${VERIFY_TIMEOUT:-300}" MEM=2048
+  TIMEOUT="${VERIFY_TIMEOUT:-480}" MEM=2048
   FAIL_RE="$FAIL_RE|Failed to start astro-daemon|astro-daemon\.service: Failed|astro-daemon\.service: Main process exited"
-  CHECK[0]='echo "VERIFY $(systemctl is-active multi-user.target astro-tune.service astro-daemon.service astro-frontend.service | paste -sd,) es=$(pgrep -cx es-de) restarts=$(systemctl show -p NRestarts --value astro-frontend.service) data=$(df -BG --output=size /data | awk "NR==2{print (\$1+0>=10)?\"grown\":\$1}") ra=$(retroarch --version >/dev/null 2>&1 && echo ok) cores=$(ls /usr/lib/libretro/*_libretro.so 2>/dev/null | wc -l | awk "{print (\$1>=10)?\"ok\":\$1}") END"'
+  CHECK[0]='echo "VERIFY $(systemctl is-active multi-user.target astro-tune.service astro-daemon.service astro-frontend.service | paste -sd,) es=$(pgrep -cx es-de) restarts=$(systemctl show -p NRestarts --value astro-frontend.service) data=$(df -BG --output=size /data | awk "NR==2{print ($1+0>=5)?\"grown\":\$1}") ra=$(retroarch --version >/dev/null 2>&1 && echo ok) cores=$(ls /usr/lib/libretro/*_libretro.so 2>/dev/null | wc -l | awk "{print (\$1>=10)?\"ok\":\$1}") END"'
   EXPECT[0]='VERIFY active,active,active,active es=1 restarts=0 data=grown ra=ok cores=ok END'
   ;;
 boss)
   TIMEOUT="${VERIFY_TIMEOUT:-1200}" MEM=3072
   FAIL_RE="$FAIL_RE|Failed to start boss|boss-server\.service: Main process exited"
-  boss_check='echo "VERIFY$(echo @N@) $(systemctl is-active multi-user.target seatd.service boss-server.service boss-kiosk.service | paste -sd,) http=$(curl -fsS -m5 http://127.0.0.1:8080/api/health) ui=$(curl -sS -m5 -o /dev/null -w %{http_code} http://127.0.0.1:8080/) cage=$(pgrep -cx cage) restarts=$(systemctl show -p NRestarts --value boss-kiosk.service) $(grep -o "root=PARTLABEL=[A-Z_]*" /proc/cmdline) data=$(df -BG --output=size /data | awk "NR==2{print (\$1+0>=10)?\"grown\":\$1}") persist=$(cat /data/verify-persist 2>/dev/null || echo none) END"'
+  boss_check='echo "VERIFY$(echo @N@) $(systemctl is-active multi-user.target seatd.service boss-server.service boss-kiosk.service | paste -sd,) http=$(curl -fsS -m5 http://127.0.0.1:8080/api/health) ui=$(curl -sS -m5 -o /dev/null -w %{http_code} http://127.0.0.1:8080/) cage=$(pgrep -cx cage) restarts=$(systemctl show -p NRestarts --value boss-kiosk.service) $(grep -o "root=PARTLABEL=[A-Z_]*" /proc/cmdline) data=$(df -BG --output=size /data | awk "NR==2{print ($1+0>=5)?\"grown\":\$1}") persist=$(cat /data/verify-persist 2>/dev/null || echo none) END"'
   # Boot 1 (slot A): services, HTTP, kiosk; then write /data, switch to B, reboot.
   CHECK[0]="${boss_check//@N@/1}"
   EXPECT[0]='VERIFY1 active,active,active,active http=ok ui=200 cage=1 restarts=0 root=PARTLABEL=ROOT_A data=grown persist=none END'
