@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<!-- ES-DE Custom Systems Configuration for B.E.E.R.C.A.D.E. A.S.T.R.O. (x86_64) -->
+<systemList>
+    <system>
+        <name>snes</name>
+        <fullname>Super Nintendo Entertainment System</fullname>
+        <path>/data/beercade/roms/snes</path>
+        <extension>.zip .ZIP .smc .SMC .sfc .SFC .fig .FIG .7z .7Z</extension>
+        <command>/usr/bin/retroarch -L /usr/lib/libretro/snes9x_libretro.so %ROM%</command>
+        <platform>snes</platform>
+        <theme>snes</theme>
+    </system>
+</systemList>

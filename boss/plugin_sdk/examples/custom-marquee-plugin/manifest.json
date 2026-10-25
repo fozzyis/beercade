@@ -1,0 +1,27 @@
+{
+  "$schema": "../../boss-plugin.schema.json",
+  "id": "custom-marquee-sync",
+  "name": "Custom LED Marquee & Score Ticker",
+  "version": "1.0.0",
+  "category": "webhook_custom",
+  "description": "Reference B.O.S.S. SDK plugin that streams live A.S.T.R.O. cabinet high scores and Square Game-Time credit drops to overhead RGB LED matrices.",
+  "author": "B.E.E.R.C.A.D.E. SDK Example",
+  "enabled": true,
+  "builtin": false,
+  "subscribed_events": [
+    "high_score",
+    "credit_transaction",
+    "node_online",
+    "node_offline"
+  ],
+  "capabilities": [
+    "rgb_matrix_banner",
+    "high_score_fanfare"
+  ],
+  "ui_panel": {
+    "tab_label": "RGB Marquees",
+    "icon": "sparkles",
+    "summary_metric_key": "dispatched_count"
+  },
+  "webhook_url": "http://127.0.0.1:9100/boss-webhook"
+}

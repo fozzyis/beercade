@@ -1,36 +1,52 @@
-import { json } from '@sveltejs/kit';
+import { json, type RequestHandler } from '@sveltejs/kit';
 
-export async function POST({ request }) {
-    const data: any = await request.json();
-    console.log('[+] Booking received:', data);
-    
-    // Scaffold: In reality, we'd save this to D1 and potentially push to BOSS
-    // if the booking is an immediate game launch.
-    
-    // Example: Forward a launch game request to BOSS if immediate
-    if (data.immediate_launch) {
-        try {
-            // In a real SvelteKit app, these would come from env or platform variables.
-            const bossUrl = 'http://boss.lan:8080';
-            const token = '';
-            const nodeId = data.node_id || 'ORION-01';
-            
-            await fetch(`${bossUrl}/api/v1/cabinet/${nodeId}/launch_game`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                    core: data.core || 'fbneo',
-                    rom: data.rom || 'sf2ce',
-                    netplay: data.netplay || false
-                })
-            });
-        } catch (err) {
-            console.error('Failed to communicate with BOSS:', err);
-        }
-    }
+export const GET: RequestHandler = async ({ platform }) => {
+	const db = platform?.env?.DB;
+	if (db) {
+		try {
+			const res = await db
+				.prepare(
+					`SELECT booking_ref, event_type, booking_date, booking_time, headcount, area, total_amount, status, created_at_ms
+					 FROM function_bookings ORDER BY created_at_ms DESC LIMIT 20`
+				)
+				.all();
+			return json({ bookings: res.results ?? [] });
+		} catch {
+			// Fall through if table not yet migrated
+		}
+	}
+	return json({ bookings: [] });
+};
 
-    return json({ success: true, booking_id: 'bkg_' + Date.now() });
-}
+export const POST: RequestHandler = async ({ request, platform }) => {
+	const data = (await request.json()) as Record<string, any>;
+
+	if (data.immediate_launch) {
+		try {
+			const envRecord = (platform?.env ?? {}) as Record<string, unknown>;
+			const bossUrl =
+				(typeof envRecord.BOSS_URL === 'string' && envRecord.BOSS_URL) ||
+				'http://localhost:8989';
+			const token =
+				(typeof envRecord.BOSS_RPC_TOKEN === 'string' && envRecord.BOSS_RPC_TOKEN) || '';
+			const nodeId = String(data.node_id || 'ASTRO-01');
+
+			await fetch(`${bossUrl}/api/v1/cabinet/${nodeId}/launch_game`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					Authorization: `Bearer ${token}`
+				},
+				body: JSON.stringify({
+					core: data.core || 'fbneo_libretro',
+					rom: data.rom || 'sfiii3.zip',
+					netplay: Boolean(data.netplay)
+				})
+			});
+		} catch (err) {
+			console.warn('BOSS immediate_launch forward skipped:', err);
+		}
+	}
+
+	return json({ success: true, booking_id: 'bkg_' + Date.now() });
+};

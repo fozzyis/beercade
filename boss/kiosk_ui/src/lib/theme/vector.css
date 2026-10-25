@@ -1,0 +1,105 @@
+/* Vector Night — 1979–82 vector monitors: black glass, thin glowing outlines,
+ * filled only when selected. Tokens are documented in themes.css. */
+:root[data-theme='vector'] {
+	--page-bg: radial-gradient(circle, rgba(255, 255, 255, 0.55) 0 1px, transparent 1.5px) 0 0 / 97px 89px,
+		radial-gradient(circle, rgba(92, 242, 255, 0.4) 0 1px, transparent 1.5px) 40px 60px / 151px 127px, #04060a;
+
+	--surface-rgb: 4, 6, 10;
+	--surface-2: #070b12;
+	--surface-3: #0c1420;
+	--inset: #02040a;
+	--scrim-rgb: 0, 0, 0;
+
+	--border: #1e3540;
+	--border-strong: #2e6e7a;
+
+	--text: #ddf8ff;
+	--text-strong: #ffffff;
+	--text-soft: #b8dce6;
+	--text-muted: #a9c6d1;
+	--text-faint: #6f8a96;
+	--muted-rgb: 169, 198, 209;
+
+	--accent: #5cf2ff;
+	--accent-rgb: 92, 242, 255;
+	--on-accent: #04060a;
+	--good: #7cff8a;
+	--good-rgb: 124, 255, 138;
+	--warn: #ffe45c;
+	--warn-rgb: 255, 228, 92;
+	--danger: #ff5c5c;
+	--danger-rgb: 255, 92, 92;
+	--danger-soft: #ff9a9a;
+	--special: #ff4fd8;
+	--special-rgb: 255, 79, 216;
+
+	--font-body: 'Share Tech Mono', 'JetBrains Mono', monospace;
+	--font-display: 'Major Mono Display', 'Share Tech Mono', monospace;
+	--font-data: 'Share Tech Mono', 'JetBrains Mono', monospace;
+
+	--glow: 0 0 8px rgba(92, 242, 255, 0.55), inset 0 0 8px rgba(92, 242, 255, 0.2);
+}
+
+:root[data-theme='vector']
+	:is(.neon-title, .brand-left h1, .section-head h2, .pay-card h2, .modal-card h2, .venue-title, .card-title, .side-title, .fanfare-headline) {
+	font-family: var(--font-display);
+	font-weight: 400;
+	text-transform: lowercase;
+	color: var(--accent);
+	text-shadow: 0 0 8px rgba(92, 242, 255, 0.8);
+}
+
+:root[data-theme='vector'] :is(.kiosk-topbar, .admin-topbar, .tv-header) {
+	border-bottom: 2px solid var(--special);
+	box-shadow: 0 6px 10px -8px rgba(255, 79, 216, 0.8);
+}
+
+:root[data-theme='vector']
+	:is(.panel-block, .kpi-card, .node-card, .side-panel, .sub-box, .plugin-sidebar, .plugin-detail-pane, .card, .cabinet-card, .game-tile, .menu-order-tile, .slot-card, .pack-btn, .score-row, .leader-row, .tap, .tier, .match, .pass-row) {
+	border-radius: 0;
+	background: transparent;
+	border: 1px solid var(--border);
+	box-shadow: none;
+}
+
+:root[data-theme='vector'] :is(.pay-card, .modal-card, .fanfare-card) {
+	border-radius: 0;
+	background: var(--page-bg);
+	border: 2px solid var(--warn);
+	box-shadow: 0 0 10px rgba(255, 228, 92, 0.45), inset 0 0 10px rgba(255, 228, 92, 0.15);
+}
+
+:root[data-theme='vector']
+	:is(.cabinet-card.selected, .cabinet-card:hover, .slot-card.active, .pack-btn.active, .match.live, .score-row.rank-1) {
+	border: 2px solid var(--accent);
+	box-shadow: var(--glow);
+}
+
+:root[data-theme='vector'] :is(.kiosk-tab, .tab-btn, .pill, .key-btn, .action-btn, .mode-tab, .nav-btn) {
+	border-radius: 0;
+	background: transparent;
+	border: 2px solid var(--accent);
+	color: var(--accent);
+	letter-spacing: 0.14em;
+	box-shadow: 0 0 8px rgba(92, 242, 255, 0.45);
+}
+
+:root[data-theme='vector']
+	:is(.kiosk-tab.active, .tab-btn.active, .pill.active, .mode-tab.active, .generate-qr-btn, .submit-btn) {
+	border-radius: 0;
+	background: var(--accent);
+	border: 2px solid var(--accent);
+	color: var(--on-accent);
+	box-shadow: 0 0 18px rgba(92, 242, 255, 0.8);
+}
+
+:root[data-theme='vector'] :is(.kpi-val, .score-value, .leader-score, .credit-pill, .slot-price, .cart-total, .initials) {
+	text-shadow: 0 0 6px currentColor;
+}
+
+:root[data-theme='vector'] :is(.kiosk-input, .token-input, .pin-dot) {
+	border-radius: 0;
+	background: transparent;
+	border: 2px solid var(--border-strong);
+	color: var(--accent);
+}

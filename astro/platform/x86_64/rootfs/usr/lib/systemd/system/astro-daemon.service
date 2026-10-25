@@ -4,7 +4,7 @@ After=network.target local-fs.target
 
 [Service]
 Type=simple
-Environment=ASTRO_STANDALONE=1
+Environment=ASTRO_STANDALONE=0
 EnvironmentFile=-/data/beercade/astro.env
 ExecStart=/usr/bin/astro-daemon
 Restart=on-failure

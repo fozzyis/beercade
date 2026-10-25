@@ -8,6 +8,11 @@ Gateway=192.168.100.1
 DNS=192.168.100.1
 DNSSEC=no
 MulticastDNS=yes
-LinkLocalAddressing=no
+DHCP=yes
+LinkLocalAddressing=fallback
 IPv6AcceptRA=no
 ConfigureWithoutCarrier=yes
+
+[DHCPv4]
+RouteMetric=100
+UseDNS=yes

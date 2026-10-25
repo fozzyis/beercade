@@ -1,4 +1,4 @@
-//! Bearer-token authentication for B.O.S.S. RPC / control endpoints.
+//! Bearer-token and Dual-Mode PIN authentication for B.O.S.S. RPC / control endpoints.
 
 use axum::{
     extract::FromRequestParts,
@@ -12,7 +12,8 @@ pub use beercade_shared::auth::{constant_time_eq, NodeClaim};
 use crate::state::SharedState;
 
 /// Extractor that fails closed unless the request presents
-/// `Authorization: Bearer <BOSS_RPC_TOKEN>`.
+/// `Authorization: Bearer <BOSS_RPC_TOKEN>` or an active operator session token
+/// minted via `POST /api/v1/auth/pin`.
 pub struct RequireRpcToken;
 
 #[axum::async_trait]
@@ -31,7 +32,7 @@ impl FromRequestParts<SharedState> for RequireRpcToken {
             .map(str::trim)
             .unwrap_or("");
 
-        if constant_time_eq(presented.as_bytes(), state.config.rpc_token.as_bytes()) {
+        if state.is_valid_operator_token(presented).await {
             Ok(RequireRpcToken)
         } else {
             tracing::warn!(path = %parts.uri.path(), "rejected unauthorised RPC request");
@@ -39,7 +40,7 @@ impl FromRequestParts<SharedState> for RequireRpcToken {
                 StatusCode::UNAUTHORIZED,
                 Json(json!({
                     "error": "unauthorized",
-                    "hint": "Provide 'Authorization: Bearer <BOSS_RPC_TOKEN>'."
+                    "hint": "Provide 'Authorization: Bearer <BOSS_RPC_TOKEN>' or unlock via operator PIN."
                 })),
             )
                 .into_response())
@@ -49,10 +50,8 @@ impl FromRequestParts<SharedState> for RequireRpcToken {
 
 /// Extractor for node-facing ingest endpoints.
 ///
-/// Accepts either `BOSS_NODE_TOKEN` (fleet nodes) **or** `BOSS_RPC_TOKEN`
-/// (operators/testing). Callers that only hold a node token are further
-/// constrained by per-handler scope checks (e.g. a node may only read/ack
-/// commands for its own `node_id`).
+/// Accepts either `BOSS_NODE_TOKEN` (fleet nodes), `BOSS_RPC_TOKEN`, or an
+/// active operator session token.
 pub struct RequireNodeToken(pub NodeClaim);
 
 #[axum::async_trait]
@@ -71,7 +70,7 @@ impl FromRequestParts<SharedState> for RequireNodeToken {
             .map(str::trim)
             .unwrap_or("");
 
-        if constant_time_eq(presented.as_bytes(), state.config.rpc_token.as_bytes()) {
+        if state.is_valid_operator_token(presented).await {
             return Ok(RequireNodeToken(NodeClaim { is_operator: true }));
         }
         if constant_time_eq(presented.as_bytes(), state.config.node_token.as_bytes()) {

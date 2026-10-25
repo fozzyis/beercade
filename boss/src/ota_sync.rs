@@ -231,6 +231,35 @@ pub async fn payload_upload_handler(
         .into_response()
 }
 
+/// GET /api/v1/sync — list staged SquashFS OTA payloads in `/data/beercade/sync`.
+pub async fn list_payloads_handler(_auth: RequireRpcToken) -> Json<serde_json::Value> {
+    let sync_dir = std::env::var("BOSS_SYNC_DIR").unwrap_or_else(|_| SYNC_DIR.to_string());
+    let mut payloads = Vec::new();
+    if let Ok(mut rd) = tokio::fs::read_dir(&sync_dir).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".sha256") {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata().await {
+                if meta.is_file() {
+                    let sha_path = format!("{}/{}.sha256", sync_dir, name);
+                    let sha256 = tokio::fs::read_to_string(&sha_path)
+                        .await
+                        .ok()
+                        .map(|s| s.trim().to_string());
+                    payloads.push(json!({
+                        "filename": name,
+                        "size_bytes": meta.len(),
+                        "sha256": sha256,
+                    }));
+                }
+            }
+        }
+    }
+    Json(json!({ "sync_dir": sync_dir, "payloads": payloads }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

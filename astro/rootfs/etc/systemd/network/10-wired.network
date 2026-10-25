@@ -5,10 +5,16 @@ Type=ether
 [Network]
 Address=192.168.100.2/24
 Gateway=192.168.100.1
-DNS=8.8.8.8
+DNS=192.168.100.1 1.1.1.1 8.8.8.8
 DNSSEC=no
-LinkLocalAddressing=no
+MulticastDNS=yes
+DHCP=yes
+LinkLocalAddressing=fallback
 LLDP=no
 EmitLLDP=no
 IPv6AcceptRA=no
 ConfigureWithoutCarrier=yes
+
+[DHCPv4]
+RouteMetric=100
+UseDNS=yes

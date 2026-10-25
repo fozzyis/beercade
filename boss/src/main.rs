@@ -1,35 +1,38 @@
 //! B.O.S.S. — B.E.E.R.C.A.D.E. Operations & Supervisory System daemon.
 //!
-//! Central telemetry hub, cabinet control plane (RPC) and Cloudflare edge
-//! sync bridge for the ASTRO cabinet fleet.
+//! Central telemetry hub, cabinet control plane (RPC), Hybrid Event-Hook + UI
+//! Panel Plugin Engine, and Cloudflare edge sync bridge for the ASTRO cabinet fleet.
 
 mod auth;
 mod edge;
 mod models;
 mod netplay_relay;
+mod ota_sync;
+mod plugins;
 mod routes;
 mod sse;
 mod state;
+mod ui_theme;
 mod ws_telemetry;
-mod ota_sync;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use tower_http::{
     cors::{Any, CorsLayer},
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
 
+use plugins::PluginEvent;
 use state::{AppState, Config};
 
 /// Period between venue-wide SSE broadcasts on the `venue` channel.
 const BROADCAST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Every second, publish the aggregated venue report and detect node
-/// online/offline transitions for the alerts channel.
+/// online/offline transitions for the alerts channel and plugin bus.
 async fn venue_broadcaster(state: Arc<AppState>) {
     let mut interval = tokio::time::interval(BROADCAST_INTERVAL);
     let mut previously_online: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -42,16 +45,30 @@ async fn venue_broadcaster(state: Arc<AppState>) {
         let currently_online: std::collections::HashSet<String> =
             report.nodes.iter().map(|n| n.node_id.clone()).collect();
 
-        let went_offline: Vec<&String> = previously_online.difference(&currently_online).collect();
+        let went_offline: Vec<String> = previously_online
+            .difference(&currently_online)
+            .cloned()
+            .collect();
         if !went_offline.is_empty() {
+            let now = models::now_epoch_ms();
             state.publish(
                 state::SseChannel::Alerts,
                 &serde_json::json!({
                     "kind": "node_offline",
                     "node_ids": went_offline,
-                    "at_epoch_ms": models::now_epoch_ms(),
+                    "at_epoch_ms": now,
                 }),
             );
+            state
+                .plugins
+                .dispatch_event(
+                    PluginEvent::NodeOffline {
+                        node_ids: went_offline,
+                        at_epoch_ms: now,
+                    },
+                    &state,
+                )
+                .await;
         }
         previously_online = currently_online;
 
@@ -76,6 +93,13 @@ async fn main() {
     if let Err(e) = tokio::fs::create_dir_all(&sync_dir).await {
         tracing::warn!("Could not create sync dir {}: {}", sync_dir, e);
     }
+
+    // Load optional out-of-tree JSON plugin manifests
+    let plugins_dir = std::env::var("BOSS_PLUGINS_DIR").unwrap_or_else(|_| "/data/beercade/plugins".to_string());
+    state
+        .plugins
+        .load_external_manifests(std::path::Path::new(&plugins_dir))
+        .await;
 
     tokio::spawn(venue_broadcaster(state.clone()));
     tokio::spawn(edge::run_edge_forwarder(state.clone()));
@@ -105,32 +129,38 @@ async fn main() {
         // Health check for Cloudflare Tunnel
         .route("/api/health", get(|| async { "ok" }))
         // Telemetry pipeline
-        .route("/api/v1/telemetry", axum::routing::post(routes::ingest_telemetry))
+        .route("/api/v1/telemetry", post(routes::ingest_telemetry))
         .route("/api/telemetry", get(routes::get_telemetry_snapshot))
         .route("/api/telemetry/stream", get(sse::telemetry_sse))
         .route("/api/v1/ws/telemetry", get(ws_telemetry::ws_telemetry_handler))
-        .route("/api/v1/sync/upload", axum::routing::post(ota_sync::payload_upload_handler))
+        // OTA SquashFS staging
+        .route("/api/v1/sync", get(ota_sync::list_payloads_handler))
+        .route("/api/v1/sync/upload", post(ota_sync::payload_upload_handler))
         .route("/api/v1/sync/:filename", get(ota_sync::payload_download_handler))
+        // Dual-Mode Operator Authentication & Overview
+        .route("/api/v1/auth/pin", post(routes::verify_operator_pin))
+        .route("/api/v1/auth/verify", get(routes::verify_operator_session))
+        .route("/api/v1/auth/logout", post(routes::revoke_operator_session))
+        .route("/api/v1/admin/overview", get(routes::get_admin_overview))
+        // Hybrid Plugin Engine API
+        .route("/api/v1/plugins", get(routes::list_plugins))
+        .route("/api/v1/plugins/webhooks", post(routes::register_webhook_plugin))
+        .route("/api/v1/plugins/:plugin_id/toggle", post(routes::toggle_plugin))
+        .route("/api/v1/plugins/:plugin_id/action", post(routes::invoke_plugin_action))
         // Authenticated cabinet RPC
-        .route(
-            "/api/v1/cabinet/:node_id/reboot",
-            axum::routing::post(routes::cabinet_reboot),
-        )
-        .route(
-            "/api/v1/cabinet/:node_id/launch_game",
-            axum::routing::post(routes::cabinet_launch_game),
-        )
-        .route("/api/v1/credits/add", axum::routing::post(routes::credits_add))
+        .route("/api/v1/cabinet/:node_id/reboot", post(routes::cabinet_reboot))
+        .route("/api/v1/cabinet/:node_id/ping", post(routes::cabinet_ping))
+        .route("/api/v1/cabinet/:node_id/launch_game", post(routes::cabinet_launch_game))
+        .route("/api/v1/credits/add", post(routes::credits_add))
         .route("/api/v1/commands/:command_id", get(routes::command_status))
         // Node command plane
         .route("/api/v1/cabinet/:node_id/commands", get(routes::poll_commands))
-        .route(
-            "/api/v1/cabinet/:node_id/commands/ack",
-            axum::routing::post(routes::ack_command),
-        )
+        .route("/api/v1/cabinet/:node_id/commands/ack", post(routes::ack_command))
         // Node events forwarded to the edge D1 store
-        .route("/api/v1/events/error", axum::routing::post(routes::report_error))
-        .route("/api/v1/scores", axum::routing::post(routes::submit_score))
+        .route("/api/v1/events/error", post(routes::report_error))
+        .route("/api/v1/scores", post(routes::submit_score))
+        // Venue-wide UI theme
+        .route("/api/v1/ui/theme", get(ui_theme::get_theme).post(ui_theme::set_theme))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

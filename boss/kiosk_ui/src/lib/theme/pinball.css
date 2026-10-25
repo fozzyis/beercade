@@ -1,0 +1,148 @@
+/* Pinball Backglass — 70s painted glass: midnight, gold-leaf double frames,
+ * sunburst rays, lit backbox lamps, cream instruction cards, pop-bumper tabs.
+ * Tokens are documented in themes.css. */
+:root[data-theme='pinball'] {
+	--page-bg: #14122a;
+
+	--surface-rgb: 28, 25, 56;
+	--surface-2: #1c1938;
+	--surface-3: #26224a;
+	--inset: #0a0812;
+	--scrim-rgb: 10, 8, 18;
+
+	--border: #5e4e22;
+	--border-strong: #d4a73a;
+
+	--text: #f7ebd3;
+	--text-strong: #fff8e8;
+	--text-soft: #e8dcc2;
+	--text-muted: #cfc3ae;
+	--text-faint: #8f8574;
+	--muted-rgb: 207, 195, 174;
+
+	--accent: #ffc94a;
+	--accent-rgb: 255, 201, 74;
+	--on-accent: #14122a;
+	--good: #7cd992;
+	--good-rgb: 124, 217, 146;
+	--warn: #f08a3c;
+	--warn-rgb: 240, 138, 60;
+	--danger: #d1272b;
+	--danger-rgb: 209, 39, 43;
+	--danger-soft: #ff8a7a;
+	--special: #8fb4ff;
+	--special-rgb: 31, 58, 147;
+
+	--font-body: 'Libre Franklin', system-ui, sans-serif;
+	--font-display: 'Shrikhand', Georgia, serif;
+	--font-data: 'Space Mono', 'JetBrains Mono', monospace;
+
+	--gold: #d4a73a;
+	--cream: #f7ebd3;
+	--royal: #1f3a93;
+	--rays: repeating-conic-gradient(from 0deg at 50% 100%, #d1272b 0 6deg, #f08a3c 6deg 12deg);
+}
+
+:root[data-theme='pinball']
+	:is(.neon-title, .brand-left h1, .section-head h2, .pay-card h2, .modal-card h2, .venue-title, .card-title, .side-title, .fanfare-headline) {
+	font-family: var(--font-display);
+	font-weight: 400;
+	letter-spacing: 0;
+	color: var(--cream);
+	text-shadow: 3px 3px 0 var(--royal);
+}
+
+:root[data-theme='pinball'] :is(.section-head h2, .card-title) {
+	color: var(--warn);
+}
+
+/* Sunburst rays behind the page headers, brand on a midnight plate */
+:root[data-theme='pinball'] :is(.kiosk-topbar, .admin-topbar, .tv-header) {
+	position: relative;
+	padding: 1.25rem 1.5rem;
+	border: 3px solid var(--gold);
+	box-shadow: 0 0 0 4px var(--page-bg), 0 0 0 6px var(--gold);
+	background: var(--rays);
+}
+
+:root[data-theme='pinball'] :is(.brand-cluster, .brand-left, .brand, .controls, .topbar-actions, .topbar-controls) {
+	background: var(--page-bg);
+	padding: 0.5rem 1rem;
+	border: 2px solid var(--gold);
+}
+
+/* Gold-leaf double frames */
+:root[data-theme='pinball']
+	:is(.panel-block, .kpi-card, .node-card, .side-panel, .sub-box, .plugin-sidebar, .plugin-detail-pane, .card, .modal-card, .pay-card, .fanfare-card, .tournament-banner) {
+	border-radius: 0;
+	border: 3px solid var(--gold);
+	background: var(--surface-2);
+	box-shadow: 0 0 0 4px var(--page-bg), 0 0 0 6px var(--gold);
+}
+
+/* Instruction cards for things you buy */
+:root[data-theme='pinball'] :is(.pack-btn, .slot-card, .tier, .menu-order-tile) {
+	border-radius: 0;
+	background: var(--cream);
+	color: var(--on-accent);
+	border: 3px solid var(--danger);
+	box-shadow: inset 0 0 0 4px var(--cream), inset 0 0 0 6px var(--royal);
+}
+
+:root[data-theme='pinball'] :is(.pack-btn, .slot-card, .tier, .menu-order-tile) :is(span, strong, h3, div) {
+	color: var(--on-accent);
+}
+
+:root[data-theme='pinball'] :is(.pack-btn.active, .slot-card.active, .tier.hot) {
+	background: #ffe29a;
+	box-shadow: inset 0 0 0 4px #ffe29a, inset 0 0 0 6px var(--royal), 0 0 0 4px var(--accent), 0 0 24px 4px rgba(255, 201, 74, 0.6);
+}
+
+/* Pop-bumper tabs */
+:root[data-theme='pinball'] :is(.kiosk-tab, .tab-btn, .pill, .mode-tab) {
+	border-radius: 999px;
+	border: 3px solid var(--cream);
+	background: var(--royal);
+	color: var(--cream);
+	font-family: var(--font-display);
+	font-weight: 400;
+	box-shadow: 0 0 0 3px var(--gold), 0 5px 0 3px #0e1c4a;
+}
+
+:root[data-theme='pinball'] :is(.kiosk-tab.active, .tab-btn.active, .pill.active, .mode-tab.active) {
+	background: var(--danger);
+	color: var(--cream);
+	box-shadow: 0 0 0 3px var(--accent), 0 0 24px 6px rgba(255, 201, 74, 0.55), 0 5px 0 3px #6e1214;
+}
+
+/* One tangerine flipper-pill */
+:root[data-theme='pinball'] :is(.generate-qr-btn, .submit-btn) {
+	border-radius: 999px;
+	border: 3px solid var(--gold);
+	background: var(--warn);
+	color: var(--on-accent);
+	font-family: var(--font-display);
+	font-weight: 400;
+	box-shadow: 0 5px 0 #8a4513;
+}
+
+/* Lit backbox lamps for live numbers */
+:root[data-theme='pinball'] :is(.kpi-val, .credit-pill, .status-corner-badge, .cart-total, .score-value, .leader-score, .count-chip, .clock) {
+	font-family: var(--font-data);
+	color: var(--accent);
+	text-shadow: 0 0 10px rgba(255, 180, 40, 0.75);
+}
+
+:root[data-theme='pinball'] .rank-badge {
+	border-radius: 50%;
+	border: 3px solid var(--cream);
+	box-shadow: 0 0 0 3px var(--gold);
+	font-family: var(--font-display);
+}
+
+:root[data-theme='pinball'] :is(.kiosk-input, .token-input, .pin-dot) {
+	border-radius: 0;
+	border: 2px solid var(--gold);
+	background: var(--inset);
+	color: var(--accent);
+}

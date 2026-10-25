@@ -185,6 +185,11 @@ Open (needs decisions or hardware):
 - **Missing cores**: FBNeo, DuckStation, PCSX2 are not packaged in Arch.
 - `astro/rt/deploy` udev/limits rules are RK3588-specific (rockchipdp0 audio)
   and not installed on x86.
+- **ASTRO Startup Behavior & Attract Mode / Interface Overhaul (Future Roadmap)**:
+  - Avoid booting into blank or unconfigured stock ES-DE interface when no game is actively selected.
+  - Option A: Boot with a curated Nintendo/SNES attraction game selected at random from bundled titles (e.g., *Donkey Kong Country*, *Donkey Kong Country 3*, *Bubsy II*, *Batman Returns* staged in `astro/roms/`).
+  - Option B: Display a custom retro "No cartridge installed" / attract screen matching the B.O.S.S. design system, featuring arcade booking prompts ("Book your time") and upcoming venue bookings/calendar sync.
+  - Keep interface overhaul aligned with future unified platform shell (deferred while B.O.S.S. interface is stabilized).
 
 ### M4 — Path ownership
 CODEOWNERS and a lint that keeps platform-specific files inside

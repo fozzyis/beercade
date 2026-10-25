@@ -6,6 +6,7 @@ use serde_json::json;
 use crate::state::{SharedState, SseChannel, EdgeItem};
 use crate::models::{NodeTelemetry, now_epoch_ms};
 use crate::auth::RequireNodeToken;
+use crate::plugins::PluginEvent;
 
 pub async fn ws_telemetry_handler(
     ws: WebSocketUpgrade,
@@ -30,10 +31,11 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
 
                         let node_id = payload.node_id.clone();
                         node_id_opt = Some(node_id.clone());
+                        let now = now_epoch_ms();
                         
                         let mut nodes = state.nodes.write().await;
                         let was_online = nodes.contains_key(&node_id);
-                        nodes.insert(node_id.clone(), (payload.clone(), now_epoch_ms()));
+                        nodes.insert(node_id.clone(), (payload.clone(), now));
                         drop(nodes);
 
                         if !was_online {
@@ -42,12 +44,26 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                                 &json!({
                                     "kind": "node_online",
                                     "node_id": node_id,
-                                    "at_epoch_ms": now_epoch_ms(),
+                                    "at_epoch_ms": now,
                                     "source": "websocket"
                                 }),
                             );
+                            state
+                                .plugins
+                                .dispatch_event(
+                                    PluginEvent::NodeOnline {
+                                        node_id: node_id.clone(),
+                                        at_epoch_ms: now,
+                                    },
+                                    &state,
+                                )
+                                .await;
                         }
 
+                        state
+                            .plugins
+                            .dispatch_event(PluginEvent::TelemetryHeartbeat(payload.clone()), &state)
+                            .await;
                         state.buffer_edge_item(EdgeItem::Telemetry(payload)).await;
                     }
                 }

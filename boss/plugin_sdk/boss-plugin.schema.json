@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://beercade.gg/schemas/boss-plugin.schema.json",
+  "title": "B.O.S.S. Plugin Manifest",
+  "description": "Declarative manifest schema for B.O.S.S. (Beercade Operational Supervisory System) plugins.",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "version",
+    "category",
+    "description",
+    "author",
+    "enabled",
+    "subscribed_events",
+    "capabilities",
+    "ui_panel"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Unique kebab-case identifier for the plugin (e.g. 'pos-payments', 'custom-marquee-sync')."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 2,
+      "description": "Human-readable display name shown in the /admin portal."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+      "description": "Semantic version string (e.g. '1.0.0')."
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "pos_payments",
+        "venue_lighting",
+        "tournament_engine",
+        "rfid_peripherals",
+        "alerting_sinks",
+        "webhook_custom"
+      ]
+    },
+    "description": {
+      "type": "string"
+    },
+    "author": {
+      "type": "string"
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "builtin": {
+      "type": "boolean",
+      "default": false
+    },
+    "subscribed_events": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "*",
+          "telemetry_heartbeat",
+          "node_online",
+          "node_offline",
+          "error_reported",
+          "high_score",
+          "credit_transaction",
+          "command_updated"
+        ]
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ui_panel": {
+      "type": "object",
+      "required": ["tab_label", "icon", "summary_metric_key"],
+      "properties": {
+        "tab_label": {
+          "type": "string"
+        },
+        "icon": {
+          "type": "string"
+        },
+        "summary_metric_key": {
+          "type": "string"
+        }
+      }
+    },
+    "webhook_url": {
+      "type": ["string", "null"],
+      "format": "uri"
+    }
+  }
+}

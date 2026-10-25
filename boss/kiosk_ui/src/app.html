@@ -4,6 +4,14 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
+		<script>
+			// Paint the last venue theme before the app boots (avoids a flash of the default).
+			try {
+				document.documentElement.dataset.theme = localStorage.getItem('boss_ui_theme') || 'taproom';
+			} catch (e) {
+				document.documentElement.dataset.theme = 'taproom';
+			}
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

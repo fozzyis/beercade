@@ -54,9 +54,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_standalone = std::env::var("ASTRO_STANDALONE").unwrap_or_default() == "1"
         || std::env::var("BOSS_ENDPOINT").unwrap_or_default() == "none";
 
+    let configured_boss_url = std::env::var("BOSS_ENDPOINT").unwrap_or_default();
+    let initial_boss_url = if configured_boss_url.is_empty() {
+        "http://192.168.100.10:8080".to_string()
+    } else {
+        configured_boss_url.clone()
+    };
+
     let node_state = Arc::new(RwLock::new(NodeState {
-        node_id: std::env::var("ASTRO_NODE_ID").unwrap_or_else(|_| "ORION-01".to_string()),
-        boss_url: std::env::var("BOSS_ENDPOINT").unwrap_or_else(|_| "http://boss.lan:8080".to_string()),
+        node_id: std::env::var("ASTRO_NODE_ID").unwrap_or_else(|_| "ASTRO-01".to_string()),
+        boss_url: initial_boss_url,
         mode: StationMode::Standalone,
     }));
 
@@ -74,106 +81,127 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let telemetry_state = node_state.clone();
         tokio::spawn(async move {
-        let mut ws_failures = 0;
-        let max_failures_before_fallback = 3;
-        
-        loop {
-            let boss_url = {
-                let state = telemetry_state.read().await;
-                state.boss_url.clone()
-            };
-            
-            let ws_url = format_ws_telemetry_url(&boss_url);
+            let mut ws_failures = 0;
+            let max_failures_before_fallback = 3;
 
-            // Build the upgrade request, attaching the bearer token so
-            // BOSS's RequireNodeToken extractor accepts the connection.
-            let mut ws_req = ws_url
-                .as_str()
-                .into_client_request()
-                .expect("valid WS URL");
-            if !boss_token.is_empty() {
-                ws_req.headers_mut().insert(
-                    "Authorization",
-                    format_bearer_header(&boss_token)
-                        .parse()
-                        .expect("valid header value"),
-                );
+            // Discovery candidate list: custom endpoint, static VLAN IP, mDNS, venue LAN DNS
+            let mut candidates = Vec::new();
+            if !configured_boss_url.is_empty() {
+                candidates.push(configured_boss_url.clone());
             }
+            candidates.push("http://192.168.100.10:8080".to_string());
+            candidates.push("http://boss.local:8080".to_string());
+            candidates.push("http://boss.lan:8080".to_string());
 
-            match connect_async(ws_req).await {
-                Ok((mut ws_stream, _)) => {
-                    println!("[✓] WebSocket telemetry connected to {}", ws_url);
-                    ws_failures = 0; // Reset failures on successful connect
-                    
-                    loop {
-                        let telemetry = {
-                            let state = telemetry_state.read().await;
-                            sample_telemetry(&state)
-                        };
+            let mut candidate_idx = 0;
+        
+            loop {
+                let boss_url = {
+                    let state = telemetry_state.read().await;
+                    state.boss_url.clone()
+                };
+            
+                let ws_url = format_ws_telemetry_url(&boss_url);
+
+                // Build the upgrade request, attaching the bearer token so
+                // BOSS's RequireNodeToken extractor accepts the connection.
+                let mut ws_req = ws_url
+                    .as_str()
+                    .into_client_request()
+                    .expect("valid WS URL");
+                if !boss_token.is_empty() {
+                    ws_req.headers_mut().insert(
+                        "Authorization",
+                        format_bearer_header(&boss_token)
+                            .parse()
+                            .expect("valid header value"),
+                    );
+                }
+
+                match connect_async(ws_req).await {
+                    Ok((mut ws_stream, _)) => {
+                        println!("[✓] WebSocket telemetry connected to {}", ws_url);
+                        ws_failures = 0; // Reset failures on successful connect
                         
-                        let msg = serde_json::to_string(&telemetry).unwrap();
-                        if let Err(e) = ws_stream.send(Message::Text(msg)).await {
-                            println!("[!] WebSocket telemetry send failed: {}", e);
-                            break;
-                        }
+                        loop {
+                            let telemetry = {
+                                let state = telemetry_state.read().await;
+                                sample_telemetry(&state)
+                            };
+                            
+                            let msg = serde_json::to_string(&telemetry).unwrap();
+                            if let Err(e) = ws_stream.send(Message::Text(msg)).await {
+                                println!("[!] WebSocket telemetry send failed: {}", e);
+                                break;
+                            }
 
-                        // Wait before next heartbeat, also check if B.O.S.S. sent us anything
-                        tokio::select! {
-                            _ = sleep(Duration::from_millis(1000)) => {}
-                            msg = ws_stream.next() => {
-                                match msg {
-                                    Some(Ok(Message::Text(text))) => {
-                                        if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&text) {
-                                            if cmd.get("kind").and_then(|v| v.as_str()) == Some("payload_available") {
-                                                if let Some(filename) = cmd.get("filename").and_then(|v| v.as_str()) {
-                                                    println!("[i] Received OTA payload notification: {}", filename);
-                                                    let boss = boss_url.replace("ws://", "http://").replace("wss://", "https://");
-                                                    let filename_owned = filename.to_string();
-                                                    let token_for_ota = boss_token.clone();
-                                                    tokio::spawn(async move {
-                                                        if let Err(e) = ota::execute_ota_update(&boss, &filename_owned, &token_for_ota).await {
-                                                            println!("[!] OTA Update failed: {}", e);
-                                                        }
-                                                    });
+                            // Wait before next heartbeat, also check if B.O.S.S. sent us anything
+                            tokio::select! {
+                                _ = sleep(Duration::from_millis(1000)) => {}
+                                msg = ws_stream.next() => {
+                                    match msg {
+                                        Some(Ok(Message::Text(text))) => {
+                                            if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&text) {
+                                                if cmd.get("kind").and_then(|v| v.as_str()) == Some("payload_available") {
+                                                    if let Some(filename) = cmd.get("filename").and_then(|v| v.as_str()) {
+                                                        println!("[i] Received OTA payload notification: {}", filename);
+                                                        let boss = boss_url.replace("ws://", "http://").replace("wss://", "https://");
+                                                        let filename_owned = filename.to_string();
+                                                        let token_for_ota = boss_token.clone();
+                                                        tokio::spawn(async move {
+                                                            if let Err(e) = ota::execute_ota_update(&boss, &filename_owned, &token_for_ota).await {
+                                                                println!("[!] OTA Update failed: {}", e);
+                                                            }
+                                                        });
+                                                    }
                                                 }
                                             }
                                         }
+                                        Some(Ok(_)) => {}
+                                        _ => break, // Connection closed or error
                                     }
-                                    Some(Ok(_)) => {}
-                                    _ => break, // Connection closed or error
                                 }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    ws_failures += 1;
-                    println!("[!] WebSocket connect failed (attempt {}): {}", ws_failures, e);
-                    
-                    if ws_failures >= max_failures_before_fallback {
-                        println!("[!] Falling back to HTTP telemetry...");
-                        let http_url = format_http_telemetry_url(&boss_url);
-                        let telemetry = {
-                            let state = telemetry_state.read().await;
-                            sample_telemetry(&state)
-                        };
-                        let _ = client
-                            .post(&http_url)
-                            .bearer_auth(&boss_token)
-                            .json(&telemetry)
-                            .send()
-                            .await;
-                        // Retry WS after 5s
-                        sleep(Duration::from_secs(5)).await;
-                    } else {
-                        // Exponential backoff up to 5 seconds
-                        let backoff = (1 << ws_failures).min(5);
-                        sleep(Duration::from_secs(backoff)).await;
+                    Err(e) => {
+                        ws_failures += 1;
+                        println!("[!] WebSocket connect failed (attempt {}): {}", ws_failures, e);
+                        
+                        if ws_failures >= max_failures_before_fallback {
+                            println!("[!] Falling back to HTTP telemetry...");
+                            let http_url = format_http_telemetry_url(&boss_url);
+                            let telemetry = {
+                                let state = telemetry_state.read().await;
+                                sample_telemetry(&state)
+                            };
+                            let http_res = client
+                                .post(&http_url)
+                                .bearer_auth(&boss_token)
+                                .json(&telemetry)
+                                .send()
+                                .await;
+                            
+                            if http_res.is_err() {
+                                // Rotate candidate endpoint to find BOSS dynamically
+                                candidate_idx = (candidate_idx + 1) % candidates.len();
+                                let next_url = candidates[candidate_idx].clone();
+                                println!("[i] Probing next candidate BOSS endpoint: {}", next_url);
+                                let mut st = telemetry_state.write().await;
+                                st.boss_url = next_url;
+                            }
+
+                            // Retry after 3s
+                            sleep(Duration::from_secs(3)).await;
+                        } else {
+                            // Exponential backoff up to 3 seconds
+                            let backoff = (1 << ws_failures).min(3);
+                            sleep(Duration::from_secs(backoff)).await;
+                        }
                     }
                 }
             }
-        }
-    });
+        });
         println!("[✓] Telemetry loop initialized. Listening for supervisor directives...");
     }
 
@@ -237,13 +265,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -------------------------------------------------------------------
     if !is_standalone {
         let client_clone = reqwest::Client::new();
-        let node_id = node_state.read().await.node_id.clone();
-        let boss_url = node_state.read().await.boss_url.clone();
+        let cmd_state = node_state.clone();
         let boss_token = std::env::var("BOSS_RPC_TOKEN").unwrap_or_default();
         
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;
+                let (boss_url, node_id) = {
+                    let st = cmd_state.read().await;
+                    (st.boss_url.clone(), st.node_id.clone())
+                };
                 let url = format!("{}/api/v1/cabinet/{}/commands", boss_url, node_id);
                 if let Ok(resp) = client_clone.get(&url).bearer_auth(&boss_token).send().await {
                     if let Ok(json) = resp.json::<serde_json::Value>().await {
