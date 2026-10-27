@@ -4,7 +4,9 @@
 use std::time::Duration;
 
 use crate::models::{EdgeBatchEnvelope, now_epoch_ms};
-use crate::state::{AppState, EdgeItem};
+use std::collections::VecDeque;
+
+use crate::state::{AppState, EdgeItem, EDGE_BUFFER_CAP};
 
 /// Flush cadence: fast enough for near-real-time analytics, sparse enough to
 /// stay well inside Cloudflare Worker request limits.
@@ -116,22 +118,22 @@ pub async fn run_edge_forwarder(state: std::sync::Arc<AppState>) {
 /// outages don't lose data (bounded by `buffer_edge_item`).
 async fn requeue_on_reject(state: std::sync::Arc<AppState>, envelope: EdgeBatchEnvelope) {
     let mut buf = state.edge_buffer.lock().await;
-    let mut items: Vec<EdgeItem> = Vec::new();
+    let mut items: VecDeque<EdgeItem> = VecDeque::new();
     for t in envelope.nodes {
-        items.push(EdgeItem::Telemetry(t));
+        items.push_back(EdgeItem::Telemetry(t));
     }
     for e in envelope.errors {
-        items.push(EdgeItem::Error(e));
+        items.push_back(EdgeItem::Error(e));
     }
     for t in envelope.transactions {
-        items.push(EdgeItem::Transaction(t));
+        items.push_back(EdgeItem::Transaction(t));
     }
     for s in envelope.scores {
-        items.push(EdgeItem::Score(s));
+        items.push_back(EdgeItem::Score(s));
     }
     items.extend(buf.drain(..));
-    if items.len() > 4_096 {
-        items.drain(..items.len() - 4_096);
+    while items.len() > EDGE_BUFFER_CAP {
+        items.pop_front();
     }
     *buf = items;
 }

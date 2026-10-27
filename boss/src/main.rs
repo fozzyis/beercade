@@ -40,10 +40,7 @@ async fn venue_broadcaster(state: Arc<AppState>) {
     loop {
         interval.tick().await;
 
-        let report = state.build_venue_report(routes::STALENESS_MS).await;
-
-        let currently_online: std::collections::HashSet<String> =
-            report.nodes.iter().map(|n| n.node_id.clone()).collect();
+        let currently_online = state.online_node_ids(routes::STALENESS_MS).await;
 
         let went_offline: Vec<String> = previously_online
             .difference(&currently_online)
@@ -72,8 +69,29 @@ async fn venue_broadcaster(state: Arc<AppState>) {
         }
         previously_online = currently_online;
 
-        state.publish(state::SseChannel::Venue, &report);
+        // Only build and serialise the full report when a screen is listening.
+        if state.has_subscribers(state::SseChannel::Venue) {
+            let report = state.build_venue_report(routes::STALENESS_MS).await;
+            state.publish(state::SseChannel::Venue, &report);
+        }
     }
+}
+
+/// SvelteKit content-hashes everything under `/_app/immutable/`, so screens may
+/// cache those files forever; HTML and API responses are left alone.
+async fn cache_immutable_assets(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let immutable = req.uri().path().starts_with("/_app/immutable/");
+    let mut res = next.run(req).await;
+    if immutable && res.status().is_success() {
+        res.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    res
 }
 
 #[tokio::main]
@@ -180,8 +198,14 @@ async fn main() {
     });
 
     let index_file = format!("{}/index.html", static_dir);
-    let serve_dir = ServeDir::new(&static_dir).fallback(ServeFile::new(index_file));
-    let app = app.fallback_service(serve_dir);
+    // Serve the .br/.gz siblings written at build time when the client accepts them.
+    let serve_dir = ServeDir::new(&static_dir)
+        .precompressed_br()
+        .precompressed_gzip()
+        .fallback(ServeFile::new(index_file).precompressed_br().precompressed_gzip());
+    let app = app
+        .fallback_service(serve_dir)
+        .layer(axum::middleware::from_fn(cache_immutable_assets));
 
     let host = std::env::var("BOSS_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("BOSS_PORT").unwrap_or_else(|_| "8989".to_string());

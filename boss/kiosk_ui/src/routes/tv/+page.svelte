@@ -186,8 +186,12 @@
 			if (z === 'stage') currentSlide = 'tournament_bracket';
 		}
 
+		// Live SSE keeps the screen current; the 5 s poll only runs while it is down.
+		let sseLive = false;
 		refreshData();
-		const pollTimer = setInterval(refreshData, 5000);
+		const pollTimer = setInterval(() => {
+			if (!sseLive) refreshData();
+		}, 5000);
 
 		const tickMs = 200;
 		const rotateTimer = setInterval(() => {
@@ -205,7 +209,10 @@
 		}, tickMs);
 
 		const unsub = subscribeBossEvents(['venue', 'alerts', 'plugins'], (channel, data) => {
-			if (channel === 'alerts' && data?.score && data?.initials) {
+			if (channel === 'venue' && Array.isArray(data?.nodes)) {
+				nodes = data.nodes;
+				if (data.venue) venueName = data.venue;
+			} else if (channel === 'alerts' && data?.score && data?.initials) {
 				const entry: HighScoreEntry = data;
 				liveScores = [entry, ...liveScores].sort((a, b) => b.score - a.score).slice(0, 10);
 				triggerFanfareBanner({
@@ -221,7 +228,14 @@
 				if (tourney?.state?.active_fanfare) {
 					triggerFanfareBanner(tourney.state.active_fanfare);
 				}
+			} else if (channel === 'plugins') {
+				// Some plugin events (e.g. a toggle) carry no full list; fetch it once.
+				fetchPlugins().then((list) => (plugins = list));
 			}
+		}, (connected) => {
+			// Catch up on anything missed while the stream was down.
+			if (connected && !sseLive) refreshData();
+			sseLive = connected;
 		});
 
 		return () => {

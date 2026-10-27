@@ -34,7 +34,9 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
                         let now = now_epoch_ms();
                         
                         let mut nodes = state.nodes.write().await;
-                        let was_online = nodes.contains_key(&node_id);
+                        let was_online = nodes.get(&node_id).is_some_and(|(_, last_seen)| {
+                            now.saturating_sub(*last_seen) < crate::routes::STALENESS_MS
+                        });
                         nodes.insert(node_id.clone(), (payload.clone(), now));
                         drop(nodes);
 

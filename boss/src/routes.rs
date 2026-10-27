@@ -86,7 +86,12 @@ pub async fn ingest_telemetry(
 
     let now = now_epoch_ms();
     let mut nodes = state.nodes.write().await;
-    let was_online = nodes.contains_key(&payload.node_id);
+    // "Online" means heard from within the staleness window, so a cabinet that
+    // dropped off and came back raises node_online again. Entries are kept so
+    // /admin can still list offline cabinets.
+    let was_online = nodes
+        .get(&payload.node_id)
+        .is_some_and(|(_, last_seen)| now.saturating_sub(*last_seen) < STALENESS_MS);
     nodes.insert(payload.node_id.clone(), (payload.clone(), now));
     drop(nodes);
 

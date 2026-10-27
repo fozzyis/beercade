@@ -571,7 +571,7 @@
 								<div class="sub-box">
 									<h3>SQUARE POS & CONNECTED TERMINALS</h3>
 									{#if selectedPlugin.state.square_config}
-										<div class="list-item-row" style="border-color: rgba(0,240,255,0.4);">
+										<div class="list-item-row" style="border-color: rgba(var(--accent-rgb), 0.4);">
 											<div>
 												<strong>Square Location: {selectedPlugin.state.square_config.location_id}</strong>
 												<small>

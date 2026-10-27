@@ -1,7 +1,7 @@
 //! Venue-wide UI theme for the kiosk, `/admin`, `/tv` and A.S.T.R.O. overlays.
 //!
 //! The active theme id is persisted to `BOSS_UI_THEME_FILE`
-//! (default `/data/beercade/ui_theme`) so it survives restarts and OTA
+//! (default `/data/beercade/state/ui_theme`) so it survives restarts and OTA
 //! updates, and every change is pushed to open screens on the `ui` SSE channel.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
@@ -17,7 +17,7 @@ pub const AVAILABLE_THEMES: &[&str] = &["taproom", "vector", "bigsky", "pinball"
 pub const DEFAULT_THEME: &str = "taproom";
 
 fn theme_file() -> String {
-    std::env::var("BOSS_UI_THEME_FILE").unwrap_or_else(|_| "/data/beercade/ui_theme".to_string())
+    std::env::var("BOSS_UI_THEME_FILE").unwrap_or_else(|_| "/data/beercade/state/ui_theme".to_string())
 }
 
 fn is_known(theme: &str) -> bool {
@@ -63,7 +63,11 @@ pub async fn set_theme(
     }
 
     *state.ui_theme.write().await = theme.clone();
-    if let Err(e) = tokio::fs::write(theme_file(), format!("{theme}\n")).await {
+    let path = theme_file();
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = tokio::fs::create_dir_all(dir).await;
+    }
+    if let Err(e) = tokio::fs::write(&path, format!("{theme}\n")).await {
         tracing::warn!(error = %e, "could not persist UI theme; it will reset on restart");
     }
     state.publish(SseChannel::Ui, &json!({ "kind": "theme_changed", "theme": theme }));

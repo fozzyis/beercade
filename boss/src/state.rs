@@ -132,6 +132,12 @@ impl Config {
 /// Router-shared state handle.
 pub type SharedState = Arc<AppState>;
 
+/// SSE payload: serialised once, shared by every subscriber without copying.
+pub type BusMessage = Arc<str>;
+
+/// Upper bound on items held for the Cloudflare edge batcher.
+pub const EDGE_BUFFER_CAP: usize = 4_096;
+
 /// Default TTL for a physical kiosk PIN-minted operator session (15 minutes).
 pub const OPERATOR_SESSION_TTL_MS: u64 = 15 * 60 * 1_000;
 
@@ -144,9 +150,9 @@ pub struct AppState {
     /// Pending (not yet polled) command ids per node, FIFO order.
     pub pending_commands: RwLock<HashMap<String, VecDeque<String>>>,
     /// Broadcast bus per SSE channel. Capacity sized for bursty venues.
-    pub buses: HashMap<SseChannel, broadcast::Sender<String>>,
+    pub buses: HashMap<SseChannel, broadcast::Sender<BusMessage>>,
     /// Buffer feeding the Cloudflare edge batcher.
-    pub edge_buffer: Mutex<Vec<EdgeItem>>,
+    pub edge_buffer: Mutex<VecDeque<EdgeItem>>,
     /// Short-lived operator session tokens minted via `POST /api/v1/auth/pin` -> expires_at_ms.
     pub operator_sessions: RwLock<HashMap<String, u64>>,
     /// Rolling history of recent cabinet error events for the operator console.
@@ -175,7 +181,7 @@ impl AppState {
             commands: RwLock::new(HashMap::new()),
             pending_commands: RwLock::new(HashMap::new()),
             buses,
-            edge_buffer: Mutex::new(Vec::new()),
+            edge_buffer: Mutex::new(VecDeque::new()),
             operator_sessions: RwLock::new(HashMap::new()),
             recent_errors: RwLock::new(VecDeque::new()),
             recent_scores: RwLock::new(VecDeque::new()),
@@ -187,7 +193,7 @@ impl AppState {
 
     pub fn publish(&self, channel: SseChannel, payload: &impl serde::Serialize) {
         if let Ok(json) = serde_json::to_string(payload) {
-            let _ = self.buses[&channel].send(json);
+            let _ = self.buses[&channel].send(Arc::from(json));
         }
     }
 
@@ -277,6 +283,23 @@ impl AppState {
     }
 
     /// Nodes seen within the staleness window.
+    /// Whether any SSE client is listening on `channel`.
+    pub fn has_subscribers(&self, channel: SseChannel) -> bool {
+        self.buses[&channel].receiver_count() > 0
+    }
+
+    /// Ids of nodes heard from within `staleness_ms`, without cloning telemetry.
+    pub async fn online_node_ids(&self, staleness_ms: u64) -> std::collections::HashSet<String> {
+        let now = now_epoch_ms();
+        self.nodes
+            .read()
+            .await
+            .iter()
+            .filter(|(_, (_, last_seen))| now.saturating_sub(*last_seen) < staleness_ms)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     pub async fn online_nodes(&self, staleness_ms: u64) -> Vec<NodeTelemetry> {
         let now = now_epoch_ms();
         self.nodes
@@ -304,11 +327,20 @@ impl AppState {
     }
 
     /// Buffer an item for the Cloudflare edge batcher (bounded to protect RAM).
+    /// No-op in local-only mode, where nothing would ever drain the buffer.
     pub async fn buffer_edge_item(&self, item: EdgeItem) {
-        let mut buf = self.edge_buffer.lock().await;
-        if buf.len() >= 4_096 {
-            buf.remove(0);
+        if !self.edge_sync_enabled() {
+            return;
         }
-        buf.push(item);
+        let mut buf = self.edge_buffer.lock().await;
+        if buf.len() >= EDGE_BUFFER_CAP {
+            buf.pop_front();
+        }
+        buf.push_back(item);
+    }
+
+    /// Same conditions under which `edge::run_edge_forwarder` keeps running.
+    pub fn edge_sync_enabled(&self) -> bool {
+        self.config.edge_ingest_url.is_some() && !self.config.edge_ingest_token.is_empty()
     }
 }

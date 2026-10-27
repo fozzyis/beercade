@@ -46,6 +46,8 @@ Within the **B.E.E.R.C.A.D.E.** (*Beercade Entertainment & Emulation Resource: C
 | `BOSS_STATIC_DIR` | `./kiosk_ui/build` | Compiled SvelteKit static bundle path |
 | `BOSS_SYNC_DIR` | `/data/beercade/sync` | Directory for staged A.S.T.R.O. SquashFS OTA payloads |
 | `BOSS_PLUGINS_DIR` | `/data/beercade/plugins` | Directory for external JSON plugin manifests |
+| `BOSS_UI_THEME` | `taproom` | Starting venue UI theme if none is saved (`taproom`, `vector`, `bigsky`, `pinball`, `classic`) |
+| `BOSS_UI_THEME_FILE` | `/data/beercade/state/ui_theme` | Where the operator's theme choice is persisted |
 | `EDGE_INGEST_URL` | *(disabled if unset)* | Cloudflare Worker `/api/v1/edge/ingest` endpoint |
 | `EDGE_INGEST_TOKEN` | *(empty)* | Shared Bearer secret for Cloudflare D1 edge ingest |
 

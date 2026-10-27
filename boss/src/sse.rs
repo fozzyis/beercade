@@ -9,7 +9,7 @@ use futures::stream::{Stream, select_all};
 use tokio::sync::broadcast;
 
 use crate::models::now_epoch_ms;
-use crate::state::{SharedState, SseChannel};
+use crate::state::{BusMessage, SharedState, SseChannel};
 
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct StreamParams {
@@ -40,7 +40,7 @@ pub async fn telemetry_sse(
         Vec::with_capacity(requested.len());
 
     for channel in requested {
-        let rx: broadcast::Receiver<String> = state.buses[&channel].subscribe();
+        let rx: broadcast::Receiver<BusMessage> = state.buses[&channel].subscribe();
         let name = channel.as_str();
         substreams.push(Box::pin(channel_stream(name, rx)));
     }
@@ -54,7 +54,7 @@ pub async fn telemetry_sse(
 
 fn channel_stream(
     name: &'static str,
-    mut rx: broadcast::Receiver<String>,
+    mut rx: broadcast::Receiver<BusMessage>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
         let mut counter: u64 = 0;
@@ -65,7 +65,7 @@ fn channel_stream(
                     yield Ok(Event::default()
                         .event(name)
                         .id(counter.to_string())
-                        .data(data));
+                        .data(&*data));
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     // Client fell behind; inform it and keep streaming live data.

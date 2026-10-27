@@ -7,3 +7,10 @@ members = [
     "shared/crates/beercade-hal",
 ]
 resolver = "2"
+
+# Smaller, faster release binaries for the boss/astro images and OTA payloads.
+# panic stays "unwind": tokio relies on it to contain a panicking task.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

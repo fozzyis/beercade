@@ -447,7 +447,7 @@
 
 					<div class="games-grid">
 						{#each featuredGames as game}
-							<div class="game-tile" style="--accent: {game.accent}">
+							<div class="game-tile" style="--game-accent: {game.accent}">
 								<div class="game-genre">{game.genre}</div>
 								<h3>{game.title}</h3>
 								<div class="game-footer">
@@ -1004,7 +1004,7 @@
 	.game-tile {
 		background: var(--surface-2);
 		border: 1px solid var(--border);
-		border-left: 4px solid var(--accent);
+		border-left: 4px solid var(--game-accent);
 		border-radius: 10px;
 		padding: 1rem;
 	}

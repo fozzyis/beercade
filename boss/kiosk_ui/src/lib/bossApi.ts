@@ -1101,7 +1101,8 @@ export async function fetchOtaPayloads(): Promise<OtaPayloadEntry[]> {
 
 export function subscribeBossEvents(
 	channels: string[],
-	onEvent: (channel: string, data: any) => void
+	onEvent: (channel: string, data: any) => void,
+	onStatus?: (connected: boolean) => void
 ): () => void {
 	if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
 		return () => {};
@@ -1109,6 +1110,10 @@ export function subscribeBossEvents(
 	try {
 		const q = encodeURIComponent(channels.join(','));
 		const es = new EventSource(`${getApiBase()}/api/telemetry/stream?channels=${q}`);
+		// EventSource reconnects on its own; report each open/drop so callers can
+		// fall back to polling only while the stream is down.
+		es.onopen = () => onStatus?.(true);
+		es.onerror = () => onStatus?.(false);
 		for (const ch of channels) {
 			es.addEventListener(ch, (ev) => {
 				try {
