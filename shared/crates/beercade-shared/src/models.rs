@@ -158,6 +158,11 @@ pub enum CabinetCommand {
     Ping {
         seq: u64,
     },
+    StartSession {
+        session_id: String,
+        duration_secs: u32,
+    },
+    EndSession,
 }
 
 /// Lifecycle state of a dispatched command.

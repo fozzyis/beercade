@@ -7,6 +7,8 @@ pub mod endpoints {
     pub const SYNC_PAYLOAD: &str = "/api/v1/sync";
     pub const HEALTH_CHECK: &str = "/api/v1/health";
     pub const VENUE_SNAPSHOT: &str = "/api/telemetry";
+    pub const SCORES: &str = "/api/v1/scores";
+    pub const ERROR_EVENTS: &str = "/api/v1/events/error";
 }
 
 /// Formats the WebSocket URL for telemetry streaming from a base HTTP/HTTPS URL.

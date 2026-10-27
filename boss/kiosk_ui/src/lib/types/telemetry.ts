@@ -54,7 +54,9 @@ export type CabinetCommand =
 	| { type: 'reboot'; delay_secs: number }
 	| { type: 'launch_game'; core: string; rom: string; netplay: boolean }
 	| { type: 'add_credits'; credits: number }
-	| { type: 'ping'; seq: number };
+	| { type: 'ping'; seq: number }
+	| { type: 'start_session'; session_id: string; duration_secs: number }
+	| { type: 'end_session' };
 
 export enum CommandStatus {
 	Queued = 'queued',

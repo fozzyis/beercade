@@ -529,15 +529,29 @@ impl BossPlugin for PosPaymentsPlugin {
                     .unwrap_or("Square Online Game-Time Pass")
                     .to_string();
 
+                let now = now_epoch_ms();
+                let duration_secs = duration_mins * 60;
+                let expires_at_ms = now + (duration_mins as u64) * 60 * 1000;
+                let session_id = format!("sess_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+                // Enqueue session countdown to put the station in Managed mode
+                app_state
+                    .enqueue_command(
+                        &node_id,
+                        CabinetCommand::StartSession {
+                            session_id: session_id.clone(),
+                            duration_secs,
+                        },
+                    )
+                    .await;
+
                 // Dispatch credits to the A.S.T.R.O. cabinet node immediately
                 let cmd_record = app_state
                     .enqueue_command(&node_id, CabinetCommand::AddCredits { credits })
                     .await;
 
-                let now = now_epoch_ms();
-                let expires_at_ms = now + (duration_mins as u64) * 60 * 1000;
                 let timed_session = ActiveTimedSession {
-                    session_id: format!("sess_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    session_id,
                     pass_code: pass_code.clone(),
                     patron_name: patron_name.clone(),
                     node_id: node_id.clone(),
@@ -715,12 +729,25 @@ impl BossPlugin for PosPaymentsPlugin {
                 let amount_cents = (duration_mins / 30) * 1000;
                 let booking_ref = format!("SLOT-{}", &uuid::Uuid::new_v4().to_string()[..6].to_uppercase());
                 let now = now_epoch_ms();
+                let duration_secs = duration_mins * 60;
+                let session_id = format!("sess_{}", &uuid::Uuid::new_v4().to_string()[..6]);
+
+                // Enqueue session countdown to put the station in Managed mode
+                app_state
+                    .enqueue_command(
+                        &node_id,
+                        CabinetCommand::StartSession {
+                            session_id: session_id.clone(),
+                            duration_secs,
+                        },
+                    )
+                    .await;
 
                 let mut st = self.inner.write().await;
                 st.total_revenue_cents += amount_cents as u64;
                 st.transactions_count += 1;
                 let timed = ActiveTimedSession {
-                    session_id: format!("sess_{}", &uuid::Uuid::new_v4().to_string()[..6]),
+                    session_id,
                     pass_code: booking_ref.clone(),
                     patron_name: patron_name.clone(),
                     node_id: node_id.clone(),
