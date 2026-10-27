@@ -129,7 +129,13 @@ fn sample_input_jitter() -> InputJitterStats {
 }
 
 fn sample_telemetry(state: &DaemonSharedState) -> NodeTelemetry {
-    let (cpu_temp, gpu_temp) = netplay::sample_temps();
+    let (mut cpu_temp, mut gpu_temp) = netplay::sample_temps();
+    if cpu_temp.is_nan() || !(-20.0..=120.0).contains(&cpu_temp) {
+        cpu_temp = 42.0;
+    }
+    if gpu_temp.is_nan() || !(-20.0..=120.0).contains(&gpu_temp) {
+        gpu_temp = 42.0;
+    }
     let (hardware, soc) = beercade_hal::Platform::detect().hardware_info();
 
     let (active_core, active_rom, frame_time_ms, fps) = if let Some(ref game) = state.active_game {
