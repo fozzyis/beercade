@@ -64,7 +64,8 @@ Compiled code (`NATIVE_BUILDS`) targets x86-64-v3 (AVX2); QEMU gates use
 `-cpu max`.
 
 Payloads: `astro.conf` (A.S.T.R.O. node), `boss.conf` (B.O.S.S. server + kiosk,
-platform files in `boss/platform/x86_64/`; reuses the astro initcpio hook and
+platform files in `boss/platform/common/` (shared with the Raspberry Pi image in
+`../aarch64`) plus the ESP in `boss/platform/x86_64/esp`; reuses the astro initcpio hook and
 mkinitcpio config, which are image-agnostic).
 
 Verification: `bash shared/tests/verify_qemu_x86_64.sh <payload>` (`make

@@ -23,6 +23,8 @@ Environment=WLR_LIBINPUT_NO_DEVICES=1
 Environment=WLR_NO_HARDWARE_CURSORS=1
 # llvmpipe fallback when there is no GPU (VMs); real GPUs still get GLES.
 Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
+# Extra Chromium flags per platform (drop-ins under boss-kiosk.service.d/).
+Environment=BOSS_KIOSK_FLAGS=
 ExecStartPre=/bin/sh -c 'for i in $(seq 60); do curl -fsS -o /dev/null http://127.0.0.1:8080/api/health && exit 0; sleep 1; done; exit 1'
 ExecStart=/usr/bin/cage -s -- /usr/bin/chromium \
     --kiosk \
@@ -32,6 +34,7 @@ ExecStart=/usr/bin/cage -s -- /usr/bin/chromium \
     --disable-session-crashed-bubble \
     --disable-dev-shm-usage \
     --user-data-dir=/run/kiosk/chromium \
+    $BOSS_KIOSK_FLAGS \
     --app=http://127.0.0.1:8080
 Restart=always
 RestartSec=3

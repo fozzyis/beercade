@@ -18,6 +18,7 @@ export const THEMES: ThemeOption[] = [
 export const DEFAULT_THEME = 'taproom';
 
 const CACHE_KEY = 'boss_ui_theme';
+const EFFECTS_KEY = 'boss_ui_effects';
 
 function isKnown(id: string | null | undefined): id is string {
 	return !!id && THEMES.some((t) => t.id === id);
@@ -30,6 +31,16 @@ export function applyTheme(id: string): void {
 		localStorage.setItem(CACHE_KEY, id);
 	} catch {
 		// storage unavailable; the venue setting is still fetched on load
+	}
+}
+
+export function applyEffects(level: 'full' | 'lite'): void {
+	if (typeof document === 'undefined') return;
+	document.documentElement.dataset.effects = level;
+	try {
+		localStorage.setItem(EFFECTS_KEY, level);
+	} catch {
+		// storage unavailable; the server value is applied on every load
 	}
 }
 
@@ -52,10 +63,11 @@ export function initTheme(onChange?: (id: string) => void): () => void {
 	}
 	applyTheme(isKnown(cached) ? cached : DEFAULT_THEME);
 
-	fetchUiTheme().then((id) => {
-		if (isKnown(id)) {
-			applyTheme(id);
-			onChange?.(id);
+	fetchUiTheme().then(({ theme, effects }) => {
+		if (effects) applyEffects(effects);
+		if (isKnown(theme)) {
+			applyTheme(theme);
+			onChange?.(theme);
 		}
 	});
 

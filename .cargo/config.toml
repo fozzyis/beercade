@@ -1,0 +1,12 @@
+# Workspace-wide build settings (merged with astro/daemon/.cargo/config.toml,
+# which adds the cross linker when building from that directory).
+
+# ARM floor: Cortex-A72. Every supported board is at least that: Raspberry Pi 4
+# (A72), Pi 5 and RK3588 (A76 + A55, both ARMv8.2, a superset). Applies to native
+# aarch64 builds (the arm64 CI runner) and to cross builds alike.
+#
+# -aes,-sha2: the Pi 4's BCM2711 ships without the ARMv8 crypto extensions, but
+# LLVM's cortex-a72 model assumes them. Crates that use them (rustls/ring,
+# sha2) detect them at run time instead, so RK3588 and Pi 5 still get them.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=cortex-a72", "-C", "target-feature=-aes,-sha2"]

@@ -60,7 +60,7 @@ on real hardware; QEMU numbers don't count.
 
 ## B.O.S.S. (found 2026-10-27)
 
-B1–B7 done 2026-10-27 (B5 left the `.woff` fallbacks in place: the latin CSS still references them, Chromium never fetches them). B8–B10 open.
+B1–B7 done 2026-10-27 (B5 left the `.woff` fallbacks in place: the latin CSS still references them, Chromium never fetches them). B8–B10 done 2026-10-27, none of them run on Pi hardware yet: B8 is `BOSS_UI_EFFECTS` (lite by default on ARM), B9 is the root `.cargo/config.toml`, B10 is `shared/buildfarm/aarch64` + `boss/platform/aarch64` (slot B not bootable yet, see that README).
 
 | # | Platform | Change | Win | Effort |
 |---|---|---|---|---|
@@ -71,6 +71,6 @@ B1–B7 done 2026-10-27 (B5 left the `.woff` fallbacks in place: the latin CSS s
 | ~~B5~~ | both | **Kiosk fonts ship every subset in two formats.** The `@fontsource/*` imports pull latin, latin-ext, cyrillic, vietnamese… as `.woff2` and `.woff` (~0.9 MB of `.woff` Chromium never uses). Import the `latin` (and `latin-ext`) subset CSS only. | Smaller image/OTA; less CSS to parse | Small |
 | ~~B6~~ | both | **`/tv` polls and streams.** It refetches `/api/telemetry` + `/api/v1/plugins` every 5 s on top of the SSE `venue`/`plugins` streams. Poll only while SSE is disconnected. | Less server and TV CPU | Small |
 | ~~B7~~ | both | **SSE fan-out copies every message per client.** `broadcast::Sender<String>` clones the full venue report for each subscriber each second. Use `Arc<str>`; and skip building the 1 Hz report when `receiver_count() == 0`. | Scales with screens | Small |
-| B8 | ARM | **Kiosk/TV GPU cost on a Pi 4.** `backdrop-filter: blur()` (PIN modal), large glows/box-shadows (Vector Night, Pinball lamps) and the full-page starfield/wood backgrounds are the expensive bits for VideoCore VI. Drop the blur on ARM and measure the themes on real hardware; Taproom and Classic are the cheapest. | Smoother kiosk on Pi 4 | Measure first |
-| B9 | ARM | **Rust target CPU.** B.O.S.S. builds for generic aarch64. `-C target-cpu=cortex-a72` is a safe floor for Pi 4, Pi 5 and RK3588 (all ≥ A72). The server is I/O-bound, so expect little; worth it only alongside B2. | Small | `.cargo/config.toml` |
-| B10 | ARM | **There is no ARM B.O.S.S. image.** The spec names Raspberry Pi 4/5 as the primary B.O.S.S. appliance, but only `boss/platform/x86_64` exists (no ARM payload, units or tmpfiles). | Prerequisite for any ARM B.O.S.S. tuning | Medium |
+| ~~B8~~ | ARM | **Kiosk/TV GPU cost on a Pi 4.** `backdrop-filter: blur()` (PIN modal), large glows/box-shadows (Vector Night, Pinball lamps) and the full-page starfield/wood backgrounds are the expensive bits for VideoCore VI. Drop the blur on ARM and measure the themes on real hardware; Taproom and Classic are the cheapest. | Smoother kiosk on Pi 4 | Measure first |
+| ~~B9~~ | ARM | **Rust target CPU.** B.O.S.S. builds for generic aarch64. `-C target-cpu=cortex-a72` is a safe floor for Pi 4, Pi 5 and RK3588 (all ≥ A72). The server is I/O-bound, so expect little; worth it only alongside B2. | Small | `.cargo/config.toml` |
+| ~~B10~~ | ARM | **There is no ARM B.O.S.S. image.** The spec names Raspberry Pi 4/5 as the primary B.O.S.S. appliance, but only `boss/platform/x86_64` exists (no ARM payload, units or tmpfiles). | Prerequisite for any ARM B.O.S.S. tuning | Medium |

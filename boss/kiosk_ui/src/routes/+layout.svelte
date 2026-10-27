@@ -23,6 +23,7 @@
 	import '$lib/theme/bigsky.css';
 	import '$lib/theme/pinball.css';
 	import '$lib/theme/controls.css';
+	import '$lib/theme/effects.css';
 	import { initTheme } from '$lib/theme/themes';
 
 	let { children } = $props();

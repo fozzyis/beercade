@@ -944,14 +944,23 @@ export async function invokePluginAction(
 	}
 }
 
-export async function fetchUiTheme(): Promise<string | null> {
+export interface UiThemeSettings {
+	theme: string | null;
+	/** 'lite' drops blur, glows and fixed backgrounds for weak GPUs. */
+	effects: 'full' | 'lite' | null;
+}
+
+export async function fetchUiTheme(): Promise<UiThemeSettings> {
 	try {
 		const res = await fetch(`${getApiBase()}/api/v1/ui/theme`);
-		if (!res.ok) return null;
+		if (!res.ok) return { theme: null, effects: null };
 		const data = await res.json();
-		return typeof data.theme === 'string' ? data.theme : null;
+		return {
+			theme: typeof data.theme === 'string' ? data.theme : null,
+			effects: data.effects === 'lite' || data.effects === 'full' ? data.effects : null
+		};
 	} catch {
-		return null;
+		return { theme: null, effects: null };
 	}
 }
 

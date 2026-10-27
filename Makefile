@@ -3,7 +3,7 @@
 # Domains: boss | astro | website | shared
 # ==============================================================================
 
-.PHONY: all check test build-boss build-astro build-website clean image-x86 verify-x86 image-boss-x86 verify-boss-x86
+.PHONY: all check test build-boss build-astro build-website clean image-x86 verify-x86 image-boss-x86 verify-boss-x86 image-boss-rpi
 
 all: check test
 
@@ -60,6 +60,10 @@ verify-x86:
 image-boss-x86:
 	@echo "=== Building x86_64 B.O.S.S. Image (out/beercade-boss-x86_64.raw) ==="
 	bash shared/buildfarm/x86_64/build_image.sh boss
+
+image-boss-rpi:
+	@echo "=== Building Raspberry Pi 4/5 B.O.S.S. Image (out/beercade-boss-rpi-aarch64.raw) ==="
+	bash shared/buildfarm/aarch64/build_image.sh boss
 
 verify-boss-x86:
 	@echo "=== Verifying x86_64 B.O.S.S. Image (QEMU + OVMF, TCG, two boots) ==="

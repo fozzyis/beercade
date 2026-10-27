@@ -8,6 +8,7 @@
 			// Paint the last venue theme before the app boots (avoids a flash of the default).
 			try {
 				document.documentElement.dataset.theme = localStorage.getItem('boss_ui_theme') || 'taproom';
+				document.documentElement.dataset.effects = localStorage.getItem('boss_ui_effects') || 'full';
 			} catch (e) {
 				document.documentElement.dataset.theme = 'taproom';
 			}

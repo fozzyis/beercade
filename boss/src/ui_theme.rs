@@ -42,10 +42,22 @@ pub struct SetThemeRequest {
     pub theme: String,
 }
 
+/// Visual effects level for screens: `full`, or `lite` (no blur, glows or
+/// fixed backgrounds) for weak GPUs such as a Raspberry Pi 4's VideoCore VI.
+/// `BOSS_UI_EFFECTS` overrides; otherwise ARM appliances default to `lite`.
+pub fn effects_level() -> &'static str {
+    match std::env::var("BOSS_UI_EFFECTS").ok().as_deref().map(str::trim) {
+        Some("full") => "full",
+        Some("lite") => "lite",
+        _ if cfg!(target_arch = "aarch64") => "lite",
+        _ => "full",
+    }
+}
+
 /// `GET /api/v1/ui/theme` — public, so patron screens can theme themselves.
 pub async fn get_theme(State(state): State<SharedState>) -> impl IntoResponse {
     let theme = state.ui_theme.read().await.clone();
-    Json(json!({ "theme": theme, "available": AVAILABLE_THEMES }))
+    Json(json!({ "theme": theme, "available": AVAILABLE_THEMES, "effects": effects_level() }))
 }
 
 /// `POST /api/v1/ui/theme` — operator only.

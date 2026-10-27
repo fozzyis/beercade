@@ -1,0 +1,50 @@
+/*
+ * Lite effects (data-effects="lite"), for weak GPUs such as the Raspberry Pi 4.
+ * B.O.S.S. picks the level (BOSS_UI_EFFECTS, default lite on ARM). Blurred
+ * shadows, backdrop blur and fixed backgrounds are the expensive repaints;
+ * solid offsets and spreads (bevels, gold frames, Big Sky's hard shadows) are
+ * cheap and stay.
+ */
+
+:root[data-effects='lite'] body {
+	background-attachment: scroll;
+}
+
+:root[data-effects='lite'] *,
+:root[data-effects='lite'] *::before,
+:root[data-effects='lite'] *::after {
+	backdrop-filter: none !important;
+	text-shadow: none !important;
+}
+
+/* Neon and vector themes are glow everywhere: drop every shadow. */
+:root[data-effects='lite']:is([data-theme='classic'], [data-theme='vector']) *,
+:root[data-effects='lite']:is([data-theme='classic'], [data-theme='vector']) *::before,
+:root[data-effects='lite']:is([data-theme='classic'], [data-theme='vector']) *::after {
+	box-shadow: none !important;
+}
+
+/* Vector Night keeps its "selected" cue as a thicker solid outline. */
+:root[data-effects='lite'][data-theme='vector']
+	:is(.kiosk-tab.active, .tab-btn.active, .pill.active, .mode-tab.active, .cabinet-card.selected, .slot-card.active, .pack-btn.active) {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+/* Pinball: keep the gold rings, lose the lamp halos. */
+:root[data-effects='lite'][data-theme='pinball'] :is(.kiosk-tab.active, .tab-btn.active, .pill.active, .mode-tab.active) {
+	box-shadow: 0 0 0 3px var(--accent), 0 5px 0 3px #6e1214 !important;
+}
+
+:root[data-effects='lite'][data-theme='pinball'] :is(.pack-btn.active, .slot-card.active, .tier.hot) {
+	box-shadow: inset 0 0 0 4px #ffe29a, inset 0 0 0 6px var(--royal), 0 0 0 4px var(--accent) !important;
+}
+
+:root[data-effects='lite'][data-theme='pinball'] .plugin-nav-item.active {
+	box-shadow: 0 0 0 2px var(--accent) !important;
+}
+
+/* The TV fanfare halo is a 120px blur. */
+:root[data-effects='lite'] .fanfare-card {
+	box-shadow: none !important;
+}
