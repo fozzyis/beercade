@@ -70,4 +70,35 @@ case "${drv}" in
         ;;
 esac
 
+# RetroArch on x86_64 defaults to Vulkan (VK_KHR_display). Only amdgpu, i915,
+# xe and NVIDIA have a Vulkan driver in the image; anything else (Hyper-V,
+# QEMU, unknown) falls back to OpenGL on KMS/GBM, which Mesa always provides.
+case "${1##*/}" in
+    retroarch)
+        mkdir -p /data/beercade/logs 2>/dev/null
+        # A.S.T.R.O. overlay: command port + venue-themed OSD, written by
+        # astro-daemon. Merged with the GL fallback below when both apply.
+        overlay_cfg=/data/beercade/cache/astro-overlay.cfg
+        append=
+        [ -r "${overlay_cfg}" ] && append=${overlay_cfg}
+        if [ "$(uname -m)" = x86_64 ]; then
+            case "${drv}" in
+                amdgpu | i915 | xe | nvidia*) ;;
+                *)
+                    echo "beercade-launcher: no Vulkan driver for ${drv:-unknown}, RetroArch on GL/KMS" >&2
+                    gl_cfg=/data/beercade/cache/retroarch-gl.cfg
+                    mkdir -p "${gl_cfg%/*}"
+                    printf '%s\n' 'video_driver = "gl"' 'video_context_driver = "kms"' >"${gl_cfg}"
+                    append=${append:+${append}|}${gl_cfg}
+                    ;;
+            esac
+        fi
+        if [ -n "${append}" ]; then
+            prog=$1
+            shift
+            exec "${prog}" --appendconfig "${append}" "$@"
+        fi
+        ;;
+esac
+
 exec "$@"

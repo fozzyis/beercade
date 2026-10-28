@@ -8,6 +8,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 mod netplay;
 mod ota;
+mod input;
+mod overlay;
 
 use beercade_shared::auth::format_bearer_header;
 use beercade_shared::ipc::{endpoints, format_http_telemetry_url, format_ws_telemetry_url};
@@ -237,7 +239,12 @@ pub async fn submit_high_score(
         req = req.bearer_auth(boss_token);
     }
     match req.send().await {
-        Ok(res) if res.status().is_success() => Ok(()),
+        Ok(res) if res.status().is_success() => {
+            overlay::RetroArch::default()
+                .show(&format!("HIGH SCORE {score} \u{00B7} POSTED TO THE VENUE TVS"))
+                .await;
+            Ok(())
+        }
         Ok(res) => Err(format!("BOSS returned HTTP {}", res.status())),
         Err(e) => Err(format!("Network error submitting score: {e}")),
     }
@@ -348,6 +355,10 @@ async fn execute_cabinet_command(
             st.add_credits(*credits);
             let available = st.credits.credits_available;
             tracing::info!(added = %credits, available = %available, "Credits added");
+            drop(st);
+            overlay::RetroArch::default()
+                .show(&format!("+{credits} CREDIT \u{00B7} CREDIT {available:02}"))
+                .await;
             (
                 true,
                 Some(serde_json::json!({
@@ -366,6 +377,10 @@ async fn execute_cabinet_command(
                 time_remaining_sec: *duration_secs,
             };
             tracing::info!(session_id = %session_id, duration_secs = %duration_secs, "Session started: StationMode -> Managed");
+            drop(st);
+            overlay::RetroArch::default()
+                .show(&format!("TIME {} \u{00B7} GAME ON", overlay::fmt_clock(*duration_secs)))
+                .await;
             (
                 true,
                 Some(serde_json::json!({
@@ -622,6 +637,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| PathBuf::from("/data/beercade"));
     let credits_path = credits_dir.join("credits.json");
     let initial_credits = DaemonSharedState::load_credits(&credits_path);
+    if let Err(e) = overlay::write_cfg(&credits_dir, overlay::DEFAULT_THEME) {
+        tracing::warn!("Failed to write overlay config: {e}");
+    }
 
     let daemon_state = Arc::new(RwLock::new(DaemonSharedState {
         node_id: node_id.clone(),
@@ -889,23 +907,139 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Pause menu: cabinet controls -> menu -> RetroArch OSD.
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let grab = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        input::spawn_readers(tx, grab.clone());
+        let menu_state = daemon_state.clone();
+        let link_peer = std::env::var("ASTRO_NETPLAY_PEER").ok();
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+            let ra = overlay::RetroArch::default();
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap_or_default();
+            let mut menu = overlay::PauseMenu::default();
+            // OSD messages fade after a few seconds: redraw while open.
+            let mut refresh = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                let effect = tokio::select! {
+                    Some(inp) = rx.recv() => menu.handle(inp),
+                    _ = refresh.tick() => {
+                        if menu.open { overlay::MenuEffect::Redraw } else { overlay::MenuEffect::None }
+                    }
+                };
+                match effect {
+                    overlay::MenuEffect::None => continue,
+                    overlay::MenuEffect::Open => {
+                        // Only over a running game; ES-DE has its own menus.
+                        if ra.is_paused().await.is_none() {
+                            menu.open = false;
+                            continue;
+                        }
+                        grab.store(true, Ordering::Relaxed);
+                        ra.set_paused(true).await;
+                    }
+                    overlay::MenuEffect::Close => {
+                        grab.store(false, Ordering::Relaxed);
+                        ra.set_paused(false).await;
+                        continue;
+                    }
+                    overlay::MenuEffect::EndSession => {
+                        grab.store(false, Ordering::Relaxed);
+                        menu_state.write().await.mode = StationMode::Locked {
+                            reason: "Session ended by player".to_string(),
+                        };
+                        terminate_running_game().await;
+                        resume_frontend().await;
+                        continue;
+                    }
+                    overlay::MenuEffect::CallStaff => {
+                        let st = menu_state.read().await.clone();
+                        let msg = format!("Staff requested at {}", st.node_id);
+                        report_node_error(
+                            &client, &st.boss_url, &st.boss_token, &st.node_id,
+                            "warn", "staff_call", &msg, None,
+                        )
+                        .await;
+                    }
+                    overlay::MenuEffect::Redraw => {}
+                }
+                let st = menu_state.read().await;
+                let time_remaining = match st.mode {
+                    StationMode::Managed { time_remaining_sec, .. } => Some(time_remaining_sec),
+                    _ => None,
+                };
+                let line = menu.render(&overlay::MenuContext {
+                    node_id: &st.node_id,
+                    credits: st.credits.credits_available,
+                    time_remaining,
+                    link_peer: link_peer.as_deref(),
+                });
+                drop(st);
+                ra.show(&line).await;
+            }
+        });
+    }
+
+    // Keep the overlay's OSD colours on the venue theme set on B.O.S.S.
+    if !is_standalone {
+        let theme_state = daemon_state.clone();
+        let data_dir = credits_dir.clone();
+        tokio::spawn(async move {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap_or_default();
+            let mut current = overlay::DEFAULT_THEME.to_string();
+            loop {
+                let boss_url = theme_state.read().await.boss_url.clone();
+                if let Some(theme) = overlay::fetch_theme(&client, &boss_url).await {
+                    if theme != current {
+                        match overlay::write_cfg(&data_dir, &theme) {
+                            Ok(()) => {
+                                tracing::info!(theme = %theme, "Overlay theme updated");
+                                current = theme;
+                            }
+                            Err(e) => tracing::warn!("Failed to write overlay config: {e}"),
+                        }
+                    }
+                }
+                sleep(Duration::from_secs(60)).await;
+            }
+        });
+    }
+
     // -------------------------------------------------------------------
     // Main supervisor watchdog loop: session countdown & station mode enforcement
     // -------------------------------------------------------------------
+    let ra = overlay::RetroArch::default();
+    // Seconds left in the CONTINUE? window after a session ran out.
+    let mut continue_left: Option<u32> = None;
     loop {
         sleep(Duration::from_secs(1)).await;
         let mut expired = false;
+        let mut hud = None;
+        let mut managed = false;
         {
             let mut state = daemon_state.write().await;
+            let credits = state.credits.credits_available;
             if let StationMode::Managed {
                 ref mut time_remaining_sec,
                 ..
             } = state.mode
             {
+                managed = true;
                 if *time_remaining_sec > 0 {
                     *time_remaining_sec -= 1;
+                    if overlay::hud_due(*time_remaining_sec) {
+                        hud = Some(overlay::hud_line(Some(*time_remaining_sec), credits, None));
+                    }
                 } else {
-                    println!("[!] Session expired. Transitioning to Locked mode.");
+                    println!("[!] Session expired. Offering CONTINUE? before locking.");
+                    managed = false;
                     state.mode = StationMode::Locked {
                         reason: "Session time limit reached. Insert token to resume.".to_string(),
                     };
@@ -914,9 +1048,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        if let Some(line) = hud {
+            ra.show(&line).await;
+        }
+
         if expired {
-            terminate_running_game().await;
-            resume_frontend().await;
+            ra.set_paused(true).await;
+            continue_left = Some(overlay::CONTINUE_SECS);
+        }
+
+        if let Some(left) = continue_left {
+            if managed {
+                // More time arrived inside the window: back to the game.
+                ra.set_paused(false).await;
+                continue_left = None;
+            } else if left == 0 {
+                continue_left = None;
+                terminate_running_game().await;
+                resume_frontend().await;
+            } else {
+                let node_id = daemon_state.read().await.node_id.clone();
+                ra.show(&overlay::continue_line(&node_id, left)).await;
+                continue_left = Some(left - 1);
+            }
         }
     }
 }
