@@ -124,6 +124,8 @@ pub fn continue_line(node_id: &str, secs_left: u32) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
     Resume,
+    /// Close this game and go back to the player's game list.
+    Quit,
     AddCredits,
     Order,
     Scores,
@@ -132,8 +134,9 @@ pub enum MenuItem {
     End,
 }
 
-pub const MENU_ITEMS: [MenuItem; 7] = [
+pub const MENU_ITEMS: [MenuItem; 8] = [
     MenuItem::Resume,
+    MenuItem::Quit,
     MenuItem::AddCredits,
     MenuItem::Order,
     MenuItem::Scores,
@@ -146,6 +149,7 @@ impl MenuItem {
     pub fn label(self) -> &'static str {
         match self {
             MenuItem::Resume => "RESUME",
+            MenuItem::Quit => "QUIT GAME",
             MenuItem::AddCredits => "ADD CREDITS",
             MenuItem::Order => "ORDER A DRINK",
             MenuItem::Scores => "HIGH SCORES",
@@ -167,6 +171,8 @@ pub enum MenuEffect {
     /// The menu changed: redraw it.
     Redraw,
     CallStaff,
+    /// Close the game; the session carries on in the game list.
+    QuitGame,
     EndSession,
 }
 
@@ -223,6 +229,10 @@ impl PauseMenu {
             }
             Ok => match self.selected() {
                 MenuItem::Resume => self.close(),
+                MenuItem::Quit => {
+                    self.open = false;
+                    MenuEffect::QuitGame
+                }
                 MenuItem::End if self.confirm_end => {
                     self.open = false;
                     MenuEffect::EndSession
@@ -272,7 +282,7 @@ impl PauseMenu {
                     None => "NOT LINKED \u{00B7} SOLO PLAY".to_string(),
                 },
                 MenuItem::Staff => format!("STAFF CALLED \u{00B7} SOMEONE IS ON THE WAY TO {}", ctx.node_id),
-                MenuItem::Resume | MenuItem::End => String::new(),
+                MenuItem::Resume | MenuItem::Quit | MenuItem::End => String::new(),
             };
             return format!("{} \u{00B7} {body} \u{00B7} B BACK", item.label());
         }
@@ -396,7 +406,7 @@ mod tests {
         let mut m = PauseMenu::default();
         assert_eq!(m.handle(Down), MenuEffect::None, "closed menu ignores nav");
         assert_eq!(m.handle(Toggle), MenuEffect::Open);
-        assert!(m.render(&ctx()).contains("PAUSED \u{00B7} TIME 02:05 \u{00B7} \u{25B6} RESUME (1/7)"));
+        assert!(m.render(&ctx()).contains("PAUSED \u{00B7} TIME 02:05 \u{00B7} \u{25B6} RESUME (1/8)"));
         assert_eq!(m.handle(Up), MenuEffect::Redraw);
         assert_eq!(m.selected(), MenuItem::End, "wraps to the bottom");
         m.handle(Down);
@@ -409,6 +419,7 @@ mod tests {
         use crate::input::MenuInput::*;
         let mut m = PauseMenu::default();
         m.handle(Toggle);
+        m.handle(Down);
         m.handle(Down);
         assert_eq!(m.handle(Ok), MenuEffect::Redraw);
         assert!(m.render(&ctx()).starts_with("ADD CREDITS \u{00B7} CREDIT 03"));
@@ -431,6 +442,17 @@ mod tests {
         assert_eq!(m.handle(Ok), MenuEffect::Redraw);
         assert!(m.render(&ctx()).starts_with("END YOUR SESSION?"));
         assert_eq!(m.handle(Ok), MenuEffect::EndSession);
+        assert!(!m.open);
+    }
+
+    #[test]
+    fn quit_game_closes_menu() {
+        use crate::input::MenuInput::*;
+        let mut m = PauseMenu::default();
+        m.handle(Toggle);
+        m.handle(Down);
+        assert_eq!(m.selected(), MenuItem::Quit);
+        assert_eq!(m.handle(Ok), MenuEffect::QuitGame);
         assert!(!m.open);
     }
 

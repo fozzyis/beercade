@@ -79,6 +79,16 @@ systemctl --root="$ROOT" mask systemd-firstboot.service
 banner "first boot settings"
 systemd-firstboot --root="$ROOT" --locale=C.UTF-8 --timezone=UTC --hostname="$HOSTNAME"
 : > "$ROOT/etc/machine-id"
+
+if [[ -n "${DEV_SSH_KEY:-}" ]]; then
+  banner "dev SSH key for root"
+  install -d -m0700 "$ROOT/root/.ssh"
+  printf '%s\n' "$DEV_SSH_KEY" > "$ROOT/root/.ssh/authorized_keys"
+  chmod 0600 "$ROOT/root/.ssh/authorized_keys"
+  install -d -m0755 "$ROOT/etc/ssh/sshd_config.d"
+  printf '%s\n' "PermitRootLogin prohibit-password" "PasswordAuthentication no" \
+    > "$ROOT/etc/ssh/sshd_config.d/10-beercade-dev.conf"
+fi
 install -d -m0755 "$ROOT/data"
 
 banner "initramfs"

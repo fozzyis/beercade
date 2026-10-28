@@ -13,8 +13,21 @@ PAYLOAD_FILE="$HERE/payloads/$PAYLOAD.conf"
 # shellcheck source=/dev/null
 source "$PAYLOAD_FILE"
 
-# Docker Desktop on Windows needs D:/... paths; pwd -W gives that in Git Bash.
-winpath() { (cd "$1" && { pwd -W 2>/dev/null || pwd; }); }
+# Docker Desktop on Windows needs D:/... paths; pwd -W gives that in Git Bash, wslpath in WSL.
+winpath() {
+  if command -v wslpath >/dev/null 2>&1; then
+    wslpath -m "$1"
+  else
+    (cd "$1" && { pwd -W 2>/dev/null || pwd; })
+  fi
+}
+
+DOCKER="docker"
+if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
+  if command -v docker.exe >/dev/null 2>&1 && docker.exe ps >/dev/null 2>&1; then
+    DOCKER="docker.exe"
+  fi
+fi
 mkdir -p "$REPO/out"
 REPO_D="$(winpath "$REPO")"
 OUT_D="$(winpath "$REPO/out")"
@@ -22,6 +35,7 @@ BIN_SUB="bin-$PAYLOAD_NAME"
 FE_SUB="fe-$PAYLOAD_NAME"
 [[ -v FRONTEND_BUILDS ]] || FRONTEND_BUILDS=()
 [[ -v NATIVE_BUILDS ]] || NATIVE_BUILDS=()
+[[ -v CARGO_APT_PACKAGES ]] || CARGO_APT_PACKAGES=()
 NATIVE_SUB="native-$PAYLOAD_NAME"
 
 banner() { printf '\n==== %s ====\n' "$*"; }
@@ -32,15 +46,19 @@ mkdir -p "$REPO/out/$BIN_SUB" "$REPO/out/$FE_SUB" "$REPO/out/$NATIVE_SUB"
 
 if ((${#CARGO_PACKAGES[@]})); then
   banner "step 1: cargo release build (${CARGO_PACKAGES[*]})"
-  docker run --rm \
+  "$DOCKER" run --rm \
     -v "$REPO_D:/src:ro" \
     -v "$OUT_D:/out" \
     -v beercade-x86-cargo-target:/target \
     -v beercade-x86-cargo-registry:/usr/local/cargo/registry \
     -e CARGO_TARGET_DIR=/target \
     -e BIN_SUB="$BIN_SUB" \
+    -e APT_PACKAGES="${CARGO_APT_PACKAGES[*]}" \
     -w /src rust:1-bookworm \
     bash -euo pipefail -c '
+      if [[ -n "$APT_PACKAGES" ]]; then
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends $APT_PACKAGES >/dev/null
+      fi
       args=(); for p in "$@"; do args+=(-p "$p"); done
       cargo build --release --locked "${args[@]}"
       for p in "$@"; do install -m 0755 "/target/release/$p" "/out/$BIN_SUB/$p"; done
@@ -54,7 +72,12 @@ if ((${#FRONTEND_BUILDS[@]})); then
   for i in "${!FRONTEND_BUILDS[@]}"; do
     IFS=: read -r fe_src fe_sub _ <<<"${FRONTEND_BUILDS[$i]}"
     banner "step 1b: frontend build $fe_src"
-    docker run --rm       -v "$REPO_D:/src:ro"       -v "$OUT_D:/out"       -v beercade-x86-npm-cache:/root/.npm       node:22-bookworm       bash -euo pipefail -c '
+    "$DOCKER" run --rm \
+      -v "$REPO_D:/src:ro" \
+      -v "$OUT_D:/out" \
+      -v beercade-x86-npm-cache:/root/.npm \
+      node:22-bookworm \
+      bash -euo pipefail -c '
         mkdir -p /build
         tar -C "/src/$1" --exclude=node_modules --exclude=.svelte-kit --exclude="./$2" -cf - . | tar -C /build -xf -
         cd /build && npm ci --no-audit --no-fund && npm run build
@@ -68,15 +91,31 @@ fi
 for i in "${!NATIVE_BUILDS[@]}"; do
   nb="${NATIVE_BUILDS[$i]}"
   banner "step 1c: native build $nb"
-  docker run --rm     -v "$REPO_D:/src:ro"     -v "$OUT_D:/out"     -v beercade-x86-pacman-cache:/var/cache/pacman/pkg     -v beercade-x86-native-cache:/cache     archlinux:latest     bash -euo pipefail -c 'mkdir -p "/out/$2/$3" && bash "/src/$1" "/out/$2/$3"' _ "$nb" "$NATIVE_SUB" "$i"
+  "$DOCKER" run --rm \
+    -v "$REPO_D:/src:ro" \
+    -v "$OUT_D:/out" \
+    -v beercade-x86-pacman-cache:/var/cache/pacman/pkg \
+    -v beercade-x86-native-cache:/cache \
+    archlinux:latest \
+    bash -euo pipefail -c 'mkdir -p "/out/$2/$3" && bash "/src/$1" "/out/$2/$3"' _ "$nb" "$NATIVE_SUB" "$i"
 done
 
+# Dev builds only: DEV_SSH_PUBKEY=~/.ssh/id_ed25519.pub installs that key for
+# root (key-only SSH). Unset for cabinet/production images.
+DEV_SSH_KEY=
+if [[ -n "${DEV_SSH_PUBKEY:-}" ]]; then
+  [[ -f "$DEV_SSH_PUBKEY" ]] || { echo "DEV_SSH_PUBKEY not found: $DEV_SSH_PUBKEY" >&2; exit 1; }
+  DEV_SSH_KEY="$(cat "$DEV_SSH_PUBKEY")"
+  banner "dev SSH key: $DEV_SSH_PUBKEY (root login enabled, NOT for production)"
+fi
+
 banner "step 2: rootfs + image assembly (archlinux, privileged)"
-docker run --rm --privileged \
+"$DOCKER" run --rm --privileged \
   -v "$REPO_D:/src:ro" \
   -v "$OUT_D:/out" \
   -v beercade-x86-pacman-cache:/var/cache/pacman/pkg \
   -e PAYLOAD="$PAYLOAD" \
+  -e DEV_SSH_KEY="$DEV_SSH_KEY" \
   archlinux:latest \
   bash /src/shared/buildfarm/x86_64/container_build.sh
 

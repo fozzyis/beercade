@@ -7,6 +7,7 @@ pub mod auth;
 pub mod crypto;
 pub mod ipc;
 pub mod models;
+pub mod shell;
 
 pub use auth::{constant_time_eq, extract_bearer_token, format_bearer_header, validate_token, NodeClaim};
 pub use crypto::{compute_sha256, verify_sha256};

@@ -1,0 +1,12 @@
+[package]
+name = "astro-shell"
+version = "0.1.0"
+edition = "2021"
+authors = ["B.E.E.R.C.A.D.E. Team"]
+description = "A.S.T.R.O. customer screen: attract call to action, game picker, time's up (SDL2 on KMS)"
+
+[dependencies]
+serde_json = "1.0"
+qrcode = { version = "0.14", default-features = false }
+sdl2 = { version = "0.37", features = ["ttf"] }
+beercade-shared = { path = "../../shared/crates/beercade-shared", default-features = false }

@@ -742,8 +742,10 @@ pub struct NetplayHealthReport {
     pub state: HealthState,
     pub loss_pct: f32,
     pub clock_offset_us: f32,
-    pub cpu_temp_c: f32,
-    pub gpu_temp_c: f32,
+    #[serde(default)]
+    pub cpu_temp_c: Option<f32>,
+    #[serde(default)]
+    pub gpu_temp_c: Option<f32>,
     pub frames_simulated: u64,
     pub rollbacks: u64,
     pub desync_events: u32,
@@ -1533,8 +1535,13 @@ impl<C: DeterministicCore> RollbackSession<C> {
 
         // 3. Thermal/power anomalies.
         let (cpu, gpu) = sample_temps();
-        let hot = cpu > CPU_TEMP_LIMIT_C || gpu > GPU_TEMP_LIMIT_C;
-        let cool = cpu < CPU_TEMP_HYST_C && gpu < GPU_TEMP_HYST_C;
+        let hot = cpu.map_or(false, |c| c > CPU_TEMP_LIMIT_C) || gpu.map_or(false, |g| g > GPU_TEMP_LIMIT_C);
+        let cool = match (cpu, gpu) {
+            (Some(c), Some(g)) => c < CPU_TEMP_HYST_C && g < GPU_TEMP_HYST_C,
+            (Some(c), None) => c < CPU_TEMP_HYST_C,
+            (None, Some(g)) => g < GPU_TEMP_HYST_C,
+            (None, None) => false,
+        };
 
         // 4. Hard-resync freeze timeout.
         if self.frozen && now_epoch_ms().saturating_sub(self.frozen_since_ms) > FREEZE_TIMEOUT_MS {
@@ -1550,13 +1557,13 @@ impl<C: DeterministicCore> RollbackSession<C> {
         }
 
         if hot && self.health != HealthState::ThermalHold {
-            warn!(cpu, gpu, "watchdog: THERMAL_HOLD (simulation frozen, network alive)");
+            warn!(?cpu, ?gpu, "watchdog: THERMAL_HOLD (simulation frozen, network alive)");
             self.health = HealthState::ThermalHold;
             self.thermal_hold = true; // hold frame clock, keep network alive
             self.send_watchdog(cpu, gpu).await;
             self.report_to_boss().await;
         } else if self.health == HealthState::ThermalHold && cool {
-            info!(cpu, gpu, "watchdog: thermal recovery, resuming");
+            info!(?cpu, ?gpu, "watchdog: thermal recovery, resuming");
             self.health = HealthState::Active;
             self.thermal_hold = false;
             self.local_capture_q.clear();
@@ -1586,12 +1593,12 @@ impl<C: DeterministicCore> RollbackSession<C> {
         false
     }
 
-    async fn send_watchdog(&self, cpu: f32, gpu: f32) {
+    async fn send_watchdog(&self, cpu: Option<f32>, gpu: Option<f32>) {
         self.send(Packet::Watchdog {
             state: self.health.as_u8(),
             loss_pct_x100: (self.loss_ewma_pct * 100.0) as u16,
-            cpu_temp_x100: (cpu * 100.0) as u16,
-            gpu_temp_x100: (gpu * 100.0) as u16,
+            cpu_temp_x100: cpu.map_or(0, |c| (c.max(0.0) * 100.0) as u16),
+            gpu_temp_x100: gpu.map_or(0, |g| (g.max(0.0) * 100.0) as u16),
         })
         .await;
     }
@@ -1627,16 +1634,23 @@ impl<C: DeterministicCore> RollbackSession<C> {
     }
 }
 
-/// (cpu, gpu) temperatures in Celsius via beercade-hal. A failed read yields
-/// NaN, which compares false against both the hot and cool thresholds, so the
-/// watchdog neither enters nor leaves THERMAL_HOLD on bad data (the old code
-/// reported a fake 42 C here). Boards without a GPU sensor reuse the CPU value.
-pub fn sample_temps() -> (f32, f32) {
+/// (cpu, gpu) temperatures in Celsius via beercade-hal.
+/// Returns (Option<f32>, Option<f32>) for (cpu, gpu). Missing sensors or failed
+/// reads return None. Does not duplicate CPU reading when GPU sensor is None.
+pub fn sample_temps() -> (Option<f32>, Option<f32>) {
     match beercade_hal::Platform::detect().read_thermals() {
-        Ok(t) => (t.cpu_c, t.gpu_c.unwrap_or(t.cpu_c)),
+        Ok(t) => {
+            let cpu = if !t.cpu_c.is_nan() && (-20.0..=120.0).contains(&t.cpu_c) {
+                Some(t.cpu_c)
+            } else {
+                None
+            };
+            let gpu = t.gpu_c.filter(|g| !g.is_nan() && (-20.0..=120.0).contains(g));
+            (cpu, gpu)
+        }
         Err(e) => {
             warn!(error = %e, "thermal read failed");
-            (f32::NAN, f32::NAN)
+            (None, None)
         }
     }
 }

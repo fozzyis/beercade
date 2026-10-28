@@ -541,6 +541,9 @@ impl BossPlugin for PosPaymentsPlugin {
                         CabinetCommand::StartSession {
                             session_id: session_id.clone(),
                             duration_secs,
+                            session_code: String::new(),
+                            topup_grace_secs: 0,
+                            games: Vec::new(),
                         },
                     )
                     .await;
@@ -739,6 +742,9 @@ impl BossPlugin for PosPaymentsPlugin {
                         CabinetCommand::StartSession {
                             session_id: session_id.clone(),
                             duration_secs,
+                            session_code: String::new(),
+                            topup_grace_secs: 0,
+                            games: Vec::new(),
                         },
                     )
                     .await;
@@ -2252,28 +2258,43 @@ impl BossPlugin for AlertingSinksPlugin {
         }
         match event {
             PluginEvent::TelemetryHeartbeat(hb) => {
-                let max_temp = hb.cpu_temp_c.max(hb.gpu_temp_c);
-                if max_temp >= st.thermal_warn_temp_c {
-                    let now = now_epoch_ms();
-                    let last = st
-                        .last_thermal_alert_by_node
-                        .get(&hb.node_id)
-                        .copied()
-                        .unwrap_or(0);
-                    // 60-second per-node cooldown
-                    if now.saturating_sub(last) >= 60_000 {
-                        st.last_thermal_alert_by_node.insert(hb.node_id.clone(), now);
-                        let threshold = st.thermal_warn_temp_c;
-                        Self::record_delivery(
-                            &mut st,
-                            "thermal",
-                            format!("Thermal Warning on {}", hb.node_id),
-                            format!(
-                                "CPU {:.1}°C / GPU {:.1}°C exceeded {:.1}°C threshold",
-                                hb.cpu_temp_c, hb.gpu_temp_c, threshold
-                            ),
-                            &hb.node_id,
-                        );
+                let max_temp = match (hb.cpu_temp_c, hb.gpu_temp_c) {
+                    (Some(c), Some(g)) => Some(c.max(g)),
+                    (Some(c), None) => Some(c),
+                    (None, Some(g)) => Some(g),
+                    (None, None) => None,
+                };
+                if let Some(max_temp) = max_temp {
+                    if max_temp >= st.thermal_warn_temp_c {
+                        let now = now_epoch_ms();
+                        let last = st
+                            .last_thermal_alert_by_node
+                            .get(&hb.node_id)
+                            .copied()
+                            .unwrap_or(0);
+                        // 60-second per-node cooldown
+                        if now.saturating_sub(last) >= 60_000 {
+                            st.last_thermal_alert_by_node.insert(hb.node_id.clone(), now);
+                            let threshold = st.thermal_warn_temp_c;
+                            let cpu_str = hb
+                                .cpu_temp_c
+                                .map(|c| format!("{:.1}°C", c))
+                                .unwrap_or_else(|| "N/A".to_string());
+                            let gpu_str = hb
+                                .gpu_temp_c
+                                .map(|g| format!("{:.1}°C", g))
+                                .unwrap_or_else(|| "N/A".to_string());
+                            Self::record_delivery(
+                                &mut st,
+                                "thermal",
+                                format!("Thermal Warning on {}", hb.node_id),
+                                format!(
+                                    "CPU {} / GPU {} exceeded {:.1}°C threshold",
+                                    cpu_str, gpu_str, threshold
+                                ),
+                                &hb.node_id,
+                            );
+                        }
                     }
                 }
             }
@@ -2620,3 +2641,81 @@ impl PluginRegistry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{AppState, Config};
+
+    fn make_dummy_telemetry(node_id: &str, cpu: Option<f32>, gpu: Option<f32>) -> NodeTelemetry {
+        NodeTelemetry {
+            node_id: node_id.to_string(),
+            hardware: "x86_64".to_string(),
+            soc: "generic".to_string(),
+            cpu_temp_c: cpu,
+            gpu_temp_c: gpu,
+            npu_load_pct: 0.0,
+            active_core: "fbneo".to_string(),
+            active_rom: "sfiii3.zip".to_string(),
+            frame_time_ms: 16.6,
+            fps: 60.0,
+            input_jitter: Default::default(),
+            netplay: None,
+            credits: Default::default(),
+            mode: serde_json::Value::Null,
+            timestamp_epoch_ms: 1700000000000,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_thermal_alert_plugin_with_none_thermals() {
+        let app_state = Arc::new(AppState::new(Config::from_env()));
+        let plugin = AlertingSinksPlugin::new();
+
+        let t = make_dummy_telemetry("ORION-01", None, None);
+        plugin.on_event(&PluginEvent::TelemetryHeartbeat(t), &app_state).await;
+
+        let snap = plugin.state_snapshot().await;
+        assert_eq!(snap["deliveries_count"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_thermal_alert_plugin_with_normal_thermals() {
+        let app_state = Arc::new(AppState::new(Config::from_env()));
+        let plugin = AlertingSinksPlugin::new();
+
+        let t = make_dummy_telemetry("ORION-01", Some(55.0), Some(60.0));
+        plugin.on_event(&PluginEvent::TelemetryHeartbeat(t), &app_state).await;
+
+        let snap = plugin.state_snapshot().await;
+        assert_eq!(snap["deliveries_count"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_thermal_alert_plugin_formats_missing_sensor_as_na() {
+        let app_state = Arc::new(AppState::new(Config::from_env()));
+        let plugin = AlertingSinksPlugin::new();
+
+        // CPU is high (85.0 >= default 78.0), GPU is None (missing sensor)
+        let t = make_dummy_telemetry("ORION-02", Some(85.0), None);
+        plugin.on_event(&PluginEvent::TelemetryHeartbeat(t), &app_state).await;
+
+        let snap = plugin.state_snapshot().await;
+        assert!(snap["deliveries_count"].as_u64().unwrap() > 0);
+        let deliveries = snap["deliveries"].as_array().unwrap();
+        let message = deliveries[0]["message"].as_str().unwrap();
+        assert!(message.contains("CPU 85.0°C / GPU N/A exceeded"), "message was: {message}");
+
+        // Now test GPU high, CPU None
+        let plugin2 = AlertingSinksPlugin::new();
+        let t2 = make_dummy_telemetry("ORION-03", None, Some(88.5));
+        plugin2.on_event(&PluginEvent::TelemetryHeartbeat(t2), &app_state).await;
+
+        let snap2 = plugin2.state_snapshot().await;
+        assert!(snap2["deliveries_count"].as_u64().unwrap() > 0);
+        let deliveries2 = snap2["deliveries"].as_array().unwrap();
+        let message2 = deliveries2[0]["message"].as_str().unwrap();
+        assert!(message2.contains("CPU N/A / GPU 88.5°C exceeded"), "message was: {message2}");
+    }
+}
+

@@ -2,6 +2,7 @@
 members = [
     "boss",
     "astro/daemon",
+    "astro/shell",
     "astro/tune",
     "shared/crates/beercade-shared",
     "shared/crates/beercade-hal",

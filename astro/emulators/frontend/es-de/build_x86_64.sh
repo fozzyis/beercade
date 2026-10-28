@@ -40,6 +40,7 @@ cp -a "$CACHE/es-de-$ESDE_TAG" /build/es-de
 
 cmake -S /build/es-de -B /build/es-de/build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_CXX_FLAGS="$ARCH_FLAGS" >/dev/null
-cmake --build /build/es-de/build -j"$(nproc)" >/dev/null
+# Capped: ES-DE's heavy template units segfaulted cc1plus at -j12 in 8 GB Docker.
+cmake --build /build/es-de/build -j"$(( $(nproc) < 4 ? $(nproc) : 4 ))" >/dev/null
 DESTDIR="$DEST" cmake --install /build/es-de/build >/dev/null
 ls -l "$DEST/usr/bin/"
