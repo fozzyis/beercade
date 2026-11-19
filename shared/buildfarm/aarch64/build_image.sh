@@ -26,40 +26,51 @@ FE_SUB="fe-$PAYLOAD_NAME-aarch64"
 banner() { printf '\n==== %s ====\n' "$*"; }
 
 banner "payload $PAYLOAD_NAME (aarch64) -> out/$IMAGE_NAME"
-rm -rf "${REPO:?}/out/$BIN_SUB" "${REPO:?}/out/$FE_SUB"
 mkdir -p "$REPO/out/$BIN_SUB" "$REPO/out/$FE_SUB"
 
 # Native arm64 build under emulation: slow (tens of minutes cold) but needs no
 # cross toolchain, and picks up .cargo/config.toml's aarch64 CPU floor.
 if ((${#CARGO_PACKAGES[@]})); then
-  banner "step 1: cargo release build (${CARGO_PACKAGES[*]}, linux/arm64)"
-  docker run --rm --platform linux/arm64 \
-    -v "$REPO_D:/src:ro" \
-    -v "$OUT_D:/out" \
-    -v beercade-arm-cargo-target:/target \
-    -v beercade-arm-cargo-registry:/usr/local/cargo/registry \
-    -e CARGO_TARGET_DIR=/target \
-    -e BIN_SUB="$BIN_SUB" \
-    -w /src rust:1-bookworm \
-    bash -euo pipefail -c '
-      args=(); for p in "$@"; do args+=(-p "$p"); done
-      cargo build --release --locked "${args[@]}"
-      for p in "$@"; do install -m 0755 "/target/release/$p" "/out/$BIN_SUB/$p"; done
-      ls -l "/out/$BIN_SUB"' _ "${CARGO_PACKAGES[@]}"
+  MISSING=0
+  for p in "${CARGO_PACKAGES[@]}"; do
+    [[ -f "$REPO/out/$BIN_SUB/$p" ]] || MISSING=1
+  done
+  if ((MISSING)); then
+    banner "step 1: cargo release build (${CARGO_PACKAGES[*]}, linux/arm64)"
+    docker run --rm --platform linux/arm64 \
+      -v "$REPO_D:/src:ro" \
+      -v "$OUT_D:/out" \
+      -v beercade-arm-cargo-target:/target \
+      -v beercade-arm-cargo-registry:/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target \
+      -e BIN_SUB="$BIN_SUB" \
+      -w /src rust:1-bookworm \
+      bash -euo pipefail -c '
+        args=(); for p in "$@"; do args+=(-p "$p"); done
+        cargo build --release --locked "${args[@]}"
+        for p in "$@"; do install -m 0755 "/target/release/$p" "/out/$BIN_SUB/$p"; done
+        ls -l "/out/$BIN_SUB"' _ "${CARGO_PACKAGES[@]}"
+  else
+    banner "step 1: using precompiled ARM64 binaries in out/$BIN_SUB (${CARGO_PACKAGES[*]})"
+  fi
 fi
 
 # Frontends are architecture-independent: built natively, as for x86.
 if ((${#FRONTEND_BUILDS[@]})); then
   for i in "${!FRONTEND_BUILDS[@]}"; do
     IFS=: read -r fe_src fe_sub _ <<<"${FRONTEND_BUILDS[$i]}"
-    banner "step 1b: frontend build $fe_src"
-    docker run --rm -v "$REPO_D:/src:ro" -v "$OUT_D:/out" -v beercade-x86-npm-cache:/root/.npm node:22-bookworm \
-      bash -euo pipefail -c '
-        mkdir -p /build
-        tar -C "/src/$1" --exclude=node_modules --exclude=.svelte-kit --exclude="./$2" -cf - . | tar -C /build -xf -
-        cd /build && npm ci --no-audit --no-fund && npm run build
-        [[ -f "$2/index.html" ]] || { echo "no $2/index.html" >&2; exit 1; }
-        mkdir -p "/out/$3/$4" && cp -a "$2/." "/out/$3/$4/"' _ "$fe_src" "$fe_sub" "$FE_SUB" "$i"
+    if [[ -f "$REPO/out/$FE_SUB/$i/index.html" ]]; then
+      banner "step 1b: using precompiled frontend in out/$FE_SUB/$i"
+    else
+      banner "step 1b: frontend build $fe_src"
+      docker run --rm -v "$REPO_D:/src:ro" -v "$OUT_D:/out" -v beercade-x86-npm-cache:/root/.npm node:22-bookworm \
+        bash -euo pipefail -c '
+          mkdir -p /build
+          tar -C "/src/$1" --exclude=node_modules --exclude=.svelte-kit --exclude="./$2" -cf - . | tar -C /build -xf -
+          cd /build && npm ci --no-audit --no-fund && npm run build
+          [[ -f "$2/index.html" ]] || { echo "no $2/index.html" >&2; exit 1; }
+          mkdir -p "/out/$3/$4" && cp -a "$2/." "/out/$3/$4/"' _ "$fe_src" "$fe_sub" "$FE_SUB" "$i"
+    fi
   done
 fi
 

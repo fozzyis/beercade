@@ -1,0 +1,17 @@
+# B.E.E.R.C.A.D.E. Low-Latency evdev Arcade Stick & Gamepad udev Rules
+# Grants direct non-root read/write access to evdev devices with 1000Hz polling
+
+# Sanwa / Xin-Mo / Generic USB Arcade Encoders
+SUBSYSTEM=="input", ATTRS{name}=="*Arcade*", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1"
+SUBSYSTEM=="input", ATTRS{name}=="*Encoder*", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1"
+SUBSYSTEM=="input", ATTRS{name}=="*Xin-Mo*", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1"
+
+# Sony DualShock / DualSense
+SUBSYSTEM=="input", ATTRS{idVendor}=="054c", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1"
+
+# Microsoft Xbox 360 / Xbox One / Series X
+SUBSYSTEM=="input", ATTRS{idVendor}=="045e", MODE="0666", ENV{ID_INPUT_JOYSTICK}="1"
+
+# Generic evdev joystick access
+KERNEL=="event*", SUBSYSTEM=="input", MODE="0666"
+KERNEL=="js*", SUBSYSTEM=="input", MODE="0666"

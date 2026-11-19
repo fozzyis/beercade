@@ -13,6 +13,7 @@ mod overlay;
 mod session;
 mod shell_ipc;
 mod staging;
+mod discovery;
 
 use beercade_shared::auth::format_bearer_header;
 use beercade_shared::ipc::{endpoints, format_http_telemetry_url, format_ws_telemetry_url};
@@ -1047,7 +1048,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let configured_boss_url = std::env::var("BOSS_ENDPOINT").unwrap_or_default();
     let initial_boss_url = if configured_boss_url.is_empty() {
-        "http://192.168.100.10:8080".to_string()
+        "http://boss:8989".to_string()
     } else {
         configured_boss_url.clone()
     };
@@ -1092,6 +1093,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default(),
     );
 
+    let reconnect_notify = Arc::new(tokio::sync::Notify::new());
+    let discovery_port: u16 = std::env::var("ASTRO_DISCOVERY_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(discovery::DEFAULT_DISCOVERY_PORT);
+    discovery::spawn_discovery_server(
+        daemon_state.clone(),
+        reconnect_notify.clone(),
+        discovery_port,
+    );
+
     if is_standalone {
         println!("[✓] A.S.T.R.O. Daemon running in Standalone Mode (BOSS hub connection disabled).");
     } else {
@@ -1102,19 +1114,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let telemetry_state = daemon_state.clone();
         let telemetry_client = client.clone();
         let token_for_ws = boss_token.clone();
+        let reconnect_notify_ws = reconnect_notify.clone();
 
         tokio::spawn(async move {
             let mut ws_failures = 0;
             let max_failures_before_fallback = 3;
 
-            // Discovery candidate list: custom endpoint, static VLAN IP, mDNS, venue LAN DNS
+            // Discovery candidate list: custom endpoint, container DNS 'boss', mDNS, venue LAN DNS, static VLAN
             let mut candidates = Vec::new();
             if !configured_boss_url.is_empty() {
                 candidates.push(configured_boss_url.clone());
             }
+            candidates.push("http://boss:8989".to_string());
+            candidates.push("http://boss.local:8989".to_string());
+            candidates.push("http://boss.lan:8989".to_string());
+            candidates.push("http://192.168.100.10:8989".to_string());
+            candidates.push("http://127.0.0.1:8989".to_string());
             candidates.push("http://192.168.100.10:8080".to_string());
             candidates.push("http://boss.local:8080".to_string());
-            candidates.push("http://boss.lan:8080".to_string());
 
             let mut candidate_idx = 0;
 
@@ -1130,7 +1147,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(req) => req,
                     Err(e) => {
                         println!("[!] Invalid WS URL {}: {}", ws_url, e);
-                        sleep(Duration::from_secs(3)).await;
+                        tokio::select! {
+                            _ = sleep(Duration::from_secs(3)) => {}
+                            _ = reconnect_notify_ws.notified() => {
+                                println!("[i] Discovery directive woke telemetry loop from error wait.");
+                            }
+                        }
                         continue;
                     }
                 };
@@ -1160,6 +1182,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             tokio::select! {
                                 _ = sleep(Duration::from_millis(1000)) => {}
+                                _ = reconnect_notify_ws.notified() => {
+                                    println!("[i] Discovery directive triggered telemetry reconnect.");
+                                    break;
+                                }
                                 msg = ws_stream.next() => {
                                     match msg {
                                         Some(Ok(Message::Text(text))) => {
@@ -1208,10 +1234,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 st.boss_url = next_url;
                             }
 
-                            sleep(Duration::from_secs(3)).await;
+                            tokio::select! {
+                                _ = sleep(Duration::from_secs(3)) => {}
+                                _ = reconnect_notify_ws.notified() => {
+                                    println!("[i] Discovery directive woke telemetry loop from HTTP fallback.");
+                                }
+                            }
                         } else {
                             let backoff = (1 << ws_failures).min(3);
-                            sleep(Duration::from_secs(backoff)).await;
+                            tokio::select! {
+                                _ = sleep(Duration::from_secs(backoff)) => {}
+                                _ = reconnect_notify_ws.notified() => {
+                                    println!("[i] Discovery directive woke telemetry loop from backoff.");
+                                }
+                            }
                         }
                     }
                 }
@@ -1344,6 +1380,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+            }
+        });
+
+        // Periodic check to trigger Attract mode if cabinet is idle without a session
+        let attract_checker_state = daemon_state.clone();
+        tokio::spawn(async move {
+            // Initial delay after boot before first attract request
+            sleep(Duration::from_secs(3)).await;
+            loop {
+                let should_request = {
+                    let st = attract_checker_state.read().await;
+                    st.session.is_none() && !st.attract_running
+                };
+                if should_request {
+                    post_cabinet_event(&attract_checker_state, &CabinetEvent::AttractNeeded).await;
+                }
+                sleep(Duration::from_secs(15)).await;
             }
         });
     }

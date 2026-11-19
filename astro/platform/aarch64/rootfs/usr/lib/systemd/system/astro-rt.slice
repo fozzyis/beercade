@@ -1,0 +1,2 @@
+[Unit]
+Description=A.S.T.R.O. realtime slice (CPUs assigned at boot by astro-tune)

@@ -24,6 +24,7 @@ dependencies = [
 name = "astro-daemon"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "beercade-hal",
  "beercade-shared",
  "futures-util",

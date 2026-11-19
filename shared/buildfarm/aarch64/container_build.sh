@@ -9,9 +9,9 @@
 # BOOT (FAT, firmware + kernel + initramfs), ROOT_A / ROOT_B (squashfs), DATA.
 set -euo pipefail
 : "${PAYLOAD:=boss}"
-SRC=/src
-OUT=/out
-CACHE=/cache
+: "${SRC:=/src}"
+: "${OUT:=/out}"
+: "${CACHE:=/cache}"
 # shellcheck source=/dev/null
 source "$SRC/shared/buildfarm/aarch64/payloads/$PAYLOAD.conf"
 : "${HOSTNAME:=$PAYLOAD_NAME}"
@@ -36,9 +36,11 @@ for f in "$MKINITCPIO_CONF" "$INITCPIO_DIR" "$BOOT_DIR" "$DATA_DIR"; do
 done
 
 banner "tools"
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg dirmngr libarchive-tools \
-  squashfs-tools dosfstools mtools e2fsprogs fdisk zstd >/dev/null
+if ! (command -v mksquashfs && command -v zstd && command -v bsdtar && command -v mcopy) >/dev/null 2>&1; then
+  apt-get update -qq
+  apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg dirmngr libarchive-tools \
+    squashfs-tools dosfstools mtools e2fsprogs fdisk zstd >/dev/null
+fi
 
 banner "Arch Linux ARM rootfs"
 mkdir -p "$CACHE"
@@ -66,7 +68,9 @@ mount --bind /proc "$ROOT/proc"
 mount --bind /sys "$ROOT/sys"
 mount --bind /dev "$ROOT/dev"
 mount --bind /dev/pts "$ROOT/dev/pts"
-trap 'umount -l "$ROOT/dev/pts" "$ROOT/dev" "$ROOT/sys" "$ROOT/proc" 2>/dev/null || true' EXIT
+mkdir -p "$CACHE/pacman-pkg" "$ROOT/var/cache/pacman/pkg"
+mount --bind "$CACHE/pacman-pkg" "$ROOT/var/cache/pacman/pkg"
+trap 'umount -l "$ROOT/var/cache/pacman/pkg" "$ROOT/dev/pts" "$ROOT/dev" "$ROOT/sys" "$ROOT/proc" 2>/dev/null || true' EXIT
 rm -f "$ROOT/etc/resolv.conf"; cp /etc/resolv.conf "$ROOT/etc/resolv.conf"
 
 banner "pacman: ${PACMAN_PACKAGES[*]}"
@@ -74,7 +78,8 @@ in_root pacman-key --init >/dev/null
 in_root pacman-key --populate archlinuxarm >/dev/null
 PACMAN_OPTS=(--noconfirm --needed)
 # pacman 7's download sandbox needs Landlock, which emulated containers lack.
-in_root pacman --help 2>/dev/null | grep -q -- --disable-sandbox && PACMAN_OPTS+=(--disable-sandbox)
+grep -q '^DisableSandbox' "$ROOT/etc/pacman.conf" 2>/dev/null || sed -i '/^\[options\]/a DisableSandbox' "$ROOT/etc/pacman.conf"
+sed -i 's/^[[:space:]]*CheckSpace/#CheckSpace/' "$ROOT/etc/pacman.conf"
 in_root pacman -Syu "${PACMAN_OPTS[@]}" "${PACMAN_PACKAGES[@]}"
 
 banner "accounts"
@@ -144,10 +149,16 @@ mv "$ROOT/root/$INITRAMFS_NAME" "$WORK/$INITRAMFS_NAME"
 cp -a "$ROOT/boot" "$WORK/boot-stage"
 rm -f "$WORK/boot-stage"/initramfs-*.img
 cp "$WORK/$INITRAMFS_NAME" "$WORK/boot-stage/"
-cp "$SRC/$BOOT_DIR/"* "$WORK/boot-stage/"
+cp "$WORK/$INITRAMFS_NAME" "$WORK/boot-stage/initramfs.img"
+cp -a "$SRC/$BOOT_DIR/." "$WORK/boot-stage/"
 find "$ROOT/boot" -mindepth 1 -delete
 
-umount -l "$ROOT/dev/pts" "$ROOT/dev" "$ROOT/sys" "$ROOT/proc"
+if [[ -d "$SRC/astro/rootfs/lib/modules" ]]; then
+  echo "  staging Rockchip kernel modules -> /usr/lib/modules"
+  cp -a "$SRC/astro/rootfs/lib/modules/." "$ROOT/usr/lib/modules/"
+fi
+
+umount -l "$ROOT/var/cache/pacman/pkg" "$ROOT/dev/pts" "$ROOT/dev" "$ROOT/sys" "$ROOT/proc"
 trap - EXIT
 ln -sfn /run/systemd/resolve/stub-resolv.conf "$ROOT/etc/resolv.conf"
 rm -rf "$ROOT"/var/cache/pacman/pkg/* "$ROOT"/var/lib/pacman/sync/*
@@ -163,7 +174,7 @@ export MTOOLS_SKIP_CHECK=1
 BOOT=$WORK/boot.img
 mkfs.vfat -F 32 -n BOOT -C "$BOOT" $((BOOT_MIB * 1024)) >/dev/null
 mcopy -i "$BOOT" -s "$WORK/boot-stage/"* ::/
-mdir -i "$BOOT" ::/ | grep -E 'config|cmdline|kernel8|initramfs|start4' || true
+mdir -i "$BOOT" ::/ | grep -E 'config|cmdline|kernel8|initramfs|start4|Image|extlinux' || true
 
 banner "DATA"
 DSTAGE=$WORK/data-stage
@@ -173,9 +184,10 @@ mkfs.ext4 -q -L DATA -d "$DSTAGE" "$WORK/data.img" "${DATA_MIB}M"
 
 banner "disk"
 # GPT boots on Pi 5 and on Pi 4 with a 2020-09 or newer bootloader EEPROM.
+# Radxa Rock 5C boots via Rockchip U-Boot at Sector 64 (32 KB offset in the 16 MiB gap).
 IMG=$WORK/disk.raw
 S=2048  # 512-byte sectors per MiB
-P1=1; P2=$((P1 + BOOT_MIB)); P3=$((P2 + ROOT_MIB)); P4=$((P3 + ROOT_MIB)); END=$((P4 + DATA_MIB))
+P1=16; P2=$((P1 + BOOT_MIB)); P3=$((P2 + ROOT_MIB)); P4=$((P3 + ROOT_MIB)); END=$((P4 + DATA_MIB))
 rm -f "$IMG"; truncate -s $(((END + 1) * 1048576)) "$IMG"
 sfdisk -q "$IMG" <<SF
 label: gpt
@@ -184,6 +196,13 @@ start=$((P2*S)), size=$((ROOT_MIB*S)), type=B921B045-1DF0-41C3-AF44-4C6F280D3FAE
 start=$((P3*S)), size=$((ROOT_MIB*S)), type=B921B045-1DF0-41C3-AF44-4C6F280D3FAE, name="ROOT_B"
 start=$((P4*S)), size=$((DATA_MIB*S)), type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="DATA"
 SF
+
+UBOOT_BIN="$SRC/shared/buildfarm/aarch64/bootloader/u-boot-rockchip.bin"
+if [[ -f "$UBOOT_BIN" ]]; then
+  echo "  flashing Rockchip U-Boot to Sector 64..."
+  dd if="$UBOOT_BIN" of="$IMG" seek=64 conv=notrunc status=none
+fi
+
 dd if="$BOOT" of="$IMG" bs=1M seek=$P1 conv=notrunc status=none
 dd if="$WORK/root.sqfs" of="$IMG" bs=1M seek=$P2 conv=notrunc status=none
 dd if="$WORK/root.sqfs" of="$IMG" bs=1M seek=$P3 conv=notrunc status=none
@@ -195,7 +214,7 @@ cp "$IMG" "$OUT/$IMAGE_NAME"
 rm -f "$OUT/$IMAGE_NAME.zst"
 if [[ "$IMAGE_COMPRESS" == zstd ]]; then
   # Flash with `zstd -dc <img>.zst | dd of=/dev/sdX bs=4M`, or Raspberry Pi Imager.
-  zstd -q -T0 -12 "$IMG" -o "$OUT/$IMAGE_NAME.zst"
+  zstd -q -T0 -6  "$IMG" -o "$OUT/$IMAGE_NAME.zst"
 fi
 (cd "$OUT" && sha256sum "$IMAGE_NAME" "$IMAGE_NAME".zst 2>/dev/null > "$IMAGE_NAME.sha256" || true)
 ls -l "$OUT/$IMAGE_NAME"*

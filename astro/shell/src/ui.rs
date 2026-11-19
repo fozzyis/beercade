@@ -12,6 +12,23 @@ pub enum Input {
     Change,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BossStatus {
+    Online,
+    Syncing,
+    Standalone,
+}
+
+impl BossStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BossStatus::Online => "ONLINE",
+            BossStatus::Syncing => "SYNCING",
+            BossStatus::Standalone => "STANDALONE",
+        }
+    }
+}
+
 /// Local screen state on top of the daemon's frame.
 #[derive(Debug, Default)]
 pub struct Ui {
@@ -19,6 +36,7 @@ pub struct Ui {
     pub sel: usize,
     /// Showing the "change my games" code screen over the picker.
     pub changing: bool,
+    pub boss_status: Option<BossStatus>,
 }
 
 impl Ui {
@@ -29,6 +47,25 @@ impl Ui {
             self.changing = false;
         }
         self.frame = Some(f);
+    }
+
+    /// Derives the current B.O.S.S. connection status.
+    pub fn boss_status(&self) -> BossStatus {
+        if let Some(s) = self.boss_status {
+            return s;
+        }
+        if let Some(f) = &self.frame {
+            let id = f.node_id.to_ascii_uppercase();
+            if id.contains("STANDALONE") || id.contains("OFFLINE") || id.contains("LOCAL") {
+                BossStatus::Standalone
+            } else if matches!(f.view, ShellView::Staging { .. }) {
+                BossStatus::Syncing
+            } else {
+                BossStatus::Online
+            }
+        } else {
+            BossStatus::Standalone
+        }
     }
 
     /// Returns what to send to the daemon, if anything.
@@ -120,5 +157,33 @@ mod tests {
         assert_eq!(ui.input(Input::Ok), None);
         assert_eq!(clock(3725), "1:02:05");
         assert_eq!(clock(125), "02:05");
+    }
+
+    #[test]
+    fn boss_status_derivation() {
+        let mut ui = Ui::default();
+        assert_eq!(ui.boss_status(), BossStatus::Standalone);
+
+        ui.set_frame(ShellFrame { node_id: "DOCKADE-01".into(), theme: "vector".into(), view: ShellView::Idle });
+        assert_eq!(ui.boss_status(), BossStatus::Online);
+
+        ui.set_frame(ShellFrame {
+            node_id: "DOCKADE-01".into(),
+            theme: "vector".into(),
+            view: ShellView::Staging {
+                session_code: "B1".into(),
+                ready: 1,
+                total: 2,
+                time_remaining_sec: 100,
+            },
+        });
+        assert_eq!(ui.boss_status(), BossStatus::Syncing);
+
+        ui.set_frame(ShellFrame {
+            node_id: "CABINET-STANDALONE".into(),
+            theme: "vector".into(),
+            view: ShellView::Idle,
+        });
+        assert_eq!(ui.boss_status(), BossStatus::Standalone);
     }
 }

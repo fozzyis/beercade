@@ -4,6 +4,8 @@
 //! Panel Plugin Engine, and Cloudflare edge sync bridge for the ASTRO cabinet fleet.
 
 mod auth;
+pub mod catalogue;
+pub mod discovery;
 mod edge;
 mod models;
 mod netplay_relay;
@@ -18,12 +20,7 @@ mod ws_telemetry;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::{get, post}, Router};
-use tower_http::{
-    cors::{Any, CorsLayer},
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use tower_http::services::{ServeDir, ServeFile};
 
 use plugins::PluginEvent;
 use state::{AppState, Config};
@@ -138,52 +135,7 @@ async fn main() {
         Err(e) => eprintln!("[!] Netplay relay disabled: {e}"),
     }
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    let app = Router::new()
-        // Health check for Cloudflare Tunnel
-        .route("/api/health", get(|| async { "ok" }))
-        // Telemetry pipeline
-        .route("/api/v1/telemetry", post(routes::ingest_telemetry))
-        .route("/api/telemetry", get(routes::get_telemetry_snapshot))
-        .route("/api/telemetry/stream", get(sse::telemetry_sse))
-        .route("/api/v1/ws/telemetry", get(ws_telemetry::ws_telemetry_handler))
-        // OTA SquashFS staging
-        .route("/api/v1/sync", get(ota_sync::list_payloads_handler))
-        .route("/api/v1/sync/upload", post(ota_sync::payload_upload_handler))
-        .route("/api/v1/sync/:filename", get(ota_sync::payload_download_handler))
-        // Dual-Mode Operator Authentication & Overview
-        .route("/api/v1/auth/pin", post(routes::verify_operator_pin))
-        .route("/api/v1/auth/verify", get(routes::verify_operator_session))
-        .route("/api/v1/auth/logout", post(routes::revoke_operator_session))
-        .route("/api/v1/admin/overview", get(routes::get_admin_overview))
-        // Hybrid Plugin Engine API
-        .route("/api/v1/plugins", get(routes::list_plugins))
-        .route("/api/v1/plugins/webhooks", post(routes::register_webhook_plugin))
-        .route("/api/v1/plugins/:plugin_id/toggle", post(routes::toggle_plugin))
-        .route("/api/v1/plugins/:plugin_id/action", post(routes::invoke_plugin_action))
-        // Authenticated cabinet RPC
-        .route("/api/v1/cabinet/:node_id/reboot", post(routes::cabinet_reboot))
-        .route("/api/v1/cabinet/:node_id/ping", post(routes::cabinet_ping))
-        .route("/api/v1/cabinet/:node_id/launch_game", post(routes::cabinet_launch_game))
-        .route("/api/v1/credits/add", post(routes::credits_add))
-        .route("/api/v1/commands/:command_id", get(routes::command_status))
-        // Node command plane
-        .route("/api/v1/cabinet/:node_id/commands", get(routes::poll_commands))
-        .route("/api/v1/cabinet/:node_id/commands/ack", post(routes::ack_command))
-        // Node events forwarded to the edge D1 store
-        .route("/api/v1/events/error", post(routes::report_error))
-        .route("/api/v1/scores", post(routes::submit_score))
-        // Venue-wide UI theme
-        .route("/api/v1/ui/theme", get(ui_theme::get_theme).post(ui_theme::set_theme))
-        .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(state)
-        // Netplay relay HTTP endpoints (own state; merged post-with_state).
-        .merge(netplay_relay::router(relay_state));
+    let app = routes::build_router_with_relay(state, relay_state);
 
     let static_dir = std::env::var("BOSS_STATIC_DIR").unwrap_or_else(|_| {
         if std::path::Path::new("/usr/share/boss/kiosk_ui").exists() {

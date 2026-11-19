@@ -1,8 +1,9 @@
 [Unit]
 Description=B.O.S.S. touchscreen kiosk (cage + chromium on KMS)
-After=boss-server.service seatd.service systemd-user-sessions.service
+After=boss-server.service seatd.service systemd-user-sessions.service local-fs.target
 Wants=boss-server.service
 Requires=seatd.service
+RequiresMountsFor=/data
 # seatd takes the active VT; keep a getty off it.
 Conflicts=getty@tty1.service
 After=getty@tty1.service
@@ -25,8 +26,18 @@ Environment=WLR_NO_HARDWARE_CURSORS=1
 Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
 # Extra Chromium flags per platform (drop-ins under boss-kiosk.service.d/).
 Environment=BOSS_KIOSK_FLAGS=
+StandardOutput=append:/data/beercade/logs/kiosk.log
+StandardError=append:/data/beercade/logs/kiosk.log
 ExecStartPre=/bin/sh -c 'for i in $(seq 60); do curl -fsS -o /dev/null http://127.0.0.1:8080/api/health && exit 0; sleep 1; done; exit 1'
-ExecStart=/usr/bin/cage -s -- /usr/bin/chromium \
+# VMs (Hyper-V's hyperv_drm, virtio, vmwgfx) only push the damage clips of an
+# atomic commit to the host, which leaves stale regions and cursor trails.
+# Force wlroots scene graph to re-render full frames (WLR_SCENE_DEBUG_DAMAGE=rerender)
+# and disable partial swap in Chromium, rather than disabling atomic modesetting.
+ExecStart=/bin/sh -c 'if systemd-detect-virt -q --vm; then \
+        export WLR_SCENE_DEBUG_DAMAGE=rerender; \
+        BOSS_KIOSK_FLAGS="$$BOSS_KIOSK_FLAGS --ui-disable-partial-swap"; \
+    fi; \
+    exec /usr/bin/cage -s -- /usr/bin/chromium \
     --kiosk \
     --ozone-platform=wayland \
     --no-first-run \
@@ -34,8 +45,8 @@ ExecStart=/usr/bin/cage -s -- /usr/bin/chromium \
     --disable-session-crashed-bubble \
     --disable-dev-shm-usage \
     --user-data-dir=/run/kiosk/chromium \
-    $BOSS_KIOSK_FLAGS \
-    --app=http://127.0.0.1:8080
+    $$BOSS_KIOSK_FLAGS \
+    --app=http://127.0.0.1:8080'
 Restart=always
 RestartSec=3
 PrivateTmp=yes

@@ -7,15 +7,21 @@
 		cabinetLaunchGame,
 		cabinetPing,
 		cabinetReboot,
+		discoverFleetNodes,
 		fetchAdminOverview,
+		fetchNetworkInterfaces,
 		fetchNetplaySessions,
 		fetchOtaPayloads,
+		forceConnectNode,
 		getApiBase,
 		getStoredOperatorToken,
 		invokePluginAction,
 		logoutOperator,
 		registerWebhookPlugin,
-		togglePlugin
+		togglePlugin,
+		type DiscoveredNode,
+		type DiscoveryReport,
+		type NetworkInterfacesReport
 	} from '$lib/bossApi';
 	import type {
 		AdminOverview,
@@ -91,6 +97,16 @@
 	let whUrl = $state('http://10.10.20.90:4000/boss-events');
 	let whDesc = $state('Streams high scores and credit transactions to bar TV ticker.');
 
+	// Fleet Discovery & Force Connect state
+	let isScanning = $state(false);
+	let isForceConnecting = $state(false);
+	let forceConnectTarget = $state('');
+	let forceConnectBossUrl = $state('');
+	let customSubnetInput = $state('');
+	let discoveryReport = $state<DiscoveryReport | null>(null);
+	let detectedBossUrl = $state('http://boss:8989');
+	let detectedInterfaces = $state<NetworkInterfacesReport['interfaces']>([]);
+
 	let selectedPlugin = $derived<PluginDescriptor | undefined>(
 		(overview?.plugins ?? []).find((p) => p.manifest.id === selectedPluginId) ??
 			overview?.plugins?.[0]
@@ -116,6 +132,58 @@
 		const alertPlugin = res.overview.plugins.find((p) => p.manifest.id === 'alerting-sinks');
 		if (alertPlugin?.state?.thermal_warn_temp_c) {
 			thermalThresholdInput = alertPlugin.state.thermal_warn_temp_c;
+		}
+
+		fetchNetworkInterfaces().then((rep) => {
+			detectedBossUrl = rep.default_boss_url;
+			detectedInterfaces = rep.interfaces;
+			if (!forceConnectBossUrl) {
+				forceConnectBossUrl = rep.default_boss_url;
+			}
+		});
+	}
+
+	async function handleForceConnect(e?: SubmitEvent) {
+		if (e) e.preventDefault();
+		if (!forceConnectTarget.trim()) {
+			showToast('Please enter an IP address or hostname to connect');
+			return;
+		}
+		isForceConnecting = true;
+		showToast(`Attempting connection to ${forceConnectTarget}...`);
+		const res = await forceConnectNode(forceConnectTarget, forceConnectBossUrl || detectedBossUrl);
+		isForceConnecting = false;
+		if (res.status === 'ok') {
+			showToast(`✓ Connected to ASTRO node ${res.node?.node_id || forceConnectTarget}`);
+			forceConnectTarget = '';
+			await refreshAll();
+		} else {
+			showToast(`⚠️ Connection failed: ${res.error || res.message || 'Unknown error'}`);
+		}
+	}
+
+	async function handleSubnetArpScan() {
+		isScanning = true;
+		showToast('Scanning ARP cache and local subnets for ASTRO nodes...');
+		const report = await discoverFleetNodes(customSubnetInput, forceConnectBossUrl || detectedBossUrl);
+		isScanning = false;
+		discoveryReport = report;
+		showToast(report.message);
+		await refreshAll();
+	}
+
+	async function handleConnectDiscovered(node: DiscoveredNode) {
+		showToast(`Connecting to ${node.node_id} at ${node.ip}:${node.port}...`);
+		const res = await forceConnectNode(`${node.ip}:${node.port}`, forceConnectBossUrl || detectedBossUrl);
+		if (res.status === 'ok') {
+			showToast(`✓ Linked ${node.node_id}`);
+			await refreshAll();
+			if (discoveryReport) {
+				const n = discoveryReport.nodes.find((item) => item.node_id === node.node_id);
+				if (n) n.connected = true;
+			}
+		} else {
+			showToast(`Failed: ${res.error || res.message}`);
 		}
 	}
 
@@ -375,6 +443,142 @@
 		<!-- TAB 1: FLEET & CABINET RPC CONTROL                                  -->
 		<!-- =================================================================== -->
 		{#if activeTab === 'fleet'}
+			<!-- Empty Fleet Notice -->
+			{#if overview.nodes.length === 0}
+				<div class="empty-fleet-alert">
+					<div class="alert-icon">⚠️</div>
+					<div class="alert-body">
+						<h3>NO ASTRO STATIONS CURRENTLY LINKED</h3>
+						<p>
+							Nodes running on a virtual network (e.g. <code>BEERCADE</code>) or unconfigured subnet may not have discovered B.O.S.S.
+							Use the <strong>Fleet Discovery & Rescue Console</strong> below to search ARP tables and subnets, or force a direct connection.
+						</p>
+					</div>
+				</div>
+			{/if}
+
+			<!-- ASTRO Fleet Discovery & Rescue Console -->
+			<div class="discovery-card">
+				<div class="discovery-head">
+					<div class="dh-title">
+						<span class="dh-icon">🛰️</span>
+						<div>
+							<h3>ASTRO NODE DISCOVERY & FLEET RESCUE</h3>
+							<p>Search ARP tables & subnets or force direct connection to lost or unlinked ASTRO cabinets</p>
+						</div>
+					</div>
+					{#if detectedInterfaces.length > 0}
+						<div class="iface-badges">
+							{#each detectedInterfaces as iface}
+								<span class="iface-badge {iface.is_default ? 'default' : ''}" title="{iface.name}: {iface.ip}">
+									{iface.subnet} ({iface.ip})
+								</span>
+							{/each}
+						</div>
+					{/if}
+				</div>
+
+				<div class="discovery-grid">
+					<!-- Box 1: Subnet & ARP Table Sweep -->
+					<div class="disc-box">
+						<div class="disc-box-title">
+							<h4>1. SUB-NET & ARP TABLE SWEEP</h4>
+							<span class="tag-auto">AUTO-DISCOVER</span>
+						</div>
+						<p class="disc-box-desc">
+							Queries kernel ARP cache (<code>/proc/net/arp</code>) and broadcasts discovery probes on UDP:8990 across candidate subnets.
+						</p>
+						<div class="disc-input-row">
+							<input
+								type="text"
+								placeholder="Subnet CIDR (e.g. 172.28.0.0/24 or blank for auto)"
+								bind:value={customSubnetInput}
+								class="disc-text-input"
+							/>
+							<button
+								type="button"
+								class="action-btn cyan {isScanning ? 'busy' : ''}"
+								onclick={handleSubnetArpScan}
+								disabled={isScanning}
+							>
+								{isScanning ? '⏳ SCANNING...' : '🔍 SCAN SUBNETS & ARP'}
+							</button>
+						</div>
+					</div>
+
+					<!-- Box 2: Force Direct Connection -->
+					<form class="disc-box" onsubmit={handleForceConnect}>
+						<div class="disc-box-title">
+							<h4>2. FORCE DIRECT NODE CONNECTION</h4>
+							<span class="tag-manual">DIRECT LINK</span>
+						</div>
+						<p class="disc-box-desc">
+							Instructs the ASTRO node on inbound port 8990 to link to this B.O.S.S. instance immediately.
+						</p>
+						<div class="disc-input-row">
+							<input
+								type="text"
+								placeholder="Target IP / Host (e.g. 172.28.0.3, astro, 192.168.1.50:8990)"
+								bind:value={forceConnectTarget}
+								class="disc-text-input"
+							/>
+							<button
+								type="submit"
+								class="action-btn primary {isForceConnecting ? 'busy' : ''}"
+								disabled={isForceConnecting}
+							>
+								{isForceConnecting ? '⏳ CONNECTING...' : '⚡ FORCE CONNECT'}
+							</button>
+						</div>
+						<div class="disc-sub-field">
+							<span>Callback BOSS URL:</span>
+							<input
+								type="text"
+								bind:value={forceConnectBossUrl}
+								placeholder={detectedBossUrl}
+								class="disc-small-input"
+							/>
+						</div>
+					</form>
+				</div>
+
+				<!-- Discovery Results Strip -->
+				{#if discoveryReport}
+					<div class="discovery-results">
+						<div class="d-results-banner">
+							<strong>SCAN RESULT:</strong> {discoveryReport.message}
+							<small>({discoveryReport.scanned_ips} IPs checked · {discoveryReport.arp_entries_found} ARP entries · {discoveryReport.duration_ms}ms)</small>
+						</div>
+						{#if discoveryReport.nodes.length > 0}
+							<div class="discovered-nodes-row">
+								{#each discoveryReport.nodes as node}
+									<div class="disc-node-card {node.connected ? 'linked' : 'unlinked'}">
+										<div class="dnc-meta">
+											<strong class="dnc-id">{node.node_id}</strong>
+											<span class="dnc-ip">{node.ip}:{node.port}</span>
+											<span class="dnc-hw">{node.hardware || 'Generic'} ({node.soc || ''})</span>
+										</div>
+										<div class="dnc-action">
+											{#if node.connected}
+												<span class="linked-tag">✓ LINKED</span>
+											{:else}
+												<button
+													type="button"
+													class="action-btn green small"
+													onclick={() => handleConnectDiscovered(node)}
+												>
+													CONNECT
+												</button>
+											{/if}
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				{/if}
+			</div>
+
 			<div class="fleet-layout">
 				<div class="fleet-cards">
 					{#each overview.nodes as entry}
@@ -1345,6 +1549,278 @@
 />
 
 <style>
+	/* Empty Fleet Alert Banner */
+	.empty-fleet-alert {
+		display: flex;
+		align-items: center;
+		gap: 1.25rem;
+		background: rgba(var(--warn-rgb), 0.12);
+		border: 1px solid var(--warn);
+		border-radius: 12px;
+		padding: 1.1rem 1.5rem;
+		margin-bottom: 1.25rem;
+	}
+
+	.empty-fleet-alert .alert-icon {
+		font-size: 2rem;
+	}
+
+	.empty-fleet-alert h3 {
+		margin: 0 0 0.35rem 0;
+		color: var(--warn);
+		font-size: 1rem;
+		font-weight: 800;
+		letter-spacing: 0.05em;
+	}
+
+	.empty-fleet-alert p {
+		margin: 0;
+		font-size: 0.85rem;
+		color: var(--text-soft);
+		line-height: 1.4;
+	}
+
+	/* Discovery & Rescue Card */
+	.discovery-card {
+		background: var(--surface-2);
+		border: 1px solid var(--border-strong);
+		border-radius: 14px;
+		padding: 1.25rem;
+		margin-bottom: 1.5rem;
+	}
+
+	.discovery-head {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+		margin-bottom: 1.15rem;
+		border-bottom: 1px solid var(--border);
+		padding-bottom: 0.85rem;
+	}
+
+	.dh-title {
+		display: flex;
+		align-items: center;
+		gap: 0.85rem;
+	}
+
+	.dh-icon {
+		font-size: 1.75rem;
+	}
+
+	.dh-title h3 {
+		margin: 0;
+		font-size: 0.95rem;
+		font-weight: 800;
+		letter-spacing: 0.05em;
+		color: var(--text-strong);
+	}
+
+	.dh-title p {
+		margin: 0.2rem 0 0;
+		font-size: 0.75rem;
+		color: var(--text-muted);
+	}
+
+	.iface-badges {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+
+	.iface-badge {
+		font-size: 0.72rem;
+		font-family: monospace;
+		padding: 0.25rem 0.6rem;
+		border-radius: 6px;
+		background: var(--surface-3);
+		border: 1px solid var(--border);
+		color: var(--text-soft);
+	}
+
+	.iface-badge.default {
+		border-color: var(--accent);
+		color: var(--accent);
+		background: rgba(var(--accent-rgb), 0.12);
+		font-weight: 700;
+	}
+
+	.discovery-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+		gap: 1.15rem;
+	}
+
+	.disc-box {
+		background: var(--inset);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 1rem;
+		display: flex;
+		flex-direction: column;
+		justify-content: space-between;
+	}
+
+	.disc-box-title {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 0.4rem;
+	}
+
+	.disc-box-title h4 {
+		margin: 0;
+		font-size: 0.82rem;
+		font-weight: 800;
+		letter-spacing: 0.04em;
+		color: var(--text);
+	}
+
+	.tag-auto {
+		background: rgba(var(--accent-rgb), 0.18);
+		color: var(--accent);
+		font-size: 0.65rem;
+		font-weight: 700;
+		padding: 0.15rem 0.45rem;
+		border-radius: 4px;
+	}
+
+	.tag-manual {
+		background: rgba(var(--good-rgb), 0.18);
+		color: var(--good);
+		font-size: 0.65rem;
+		font-weight: 700;
+		padding: 0.15rem 0.45rem;
+		border-radius: 4px;
+	}
+
+	.disc-box-desc {
+		margin: 0 0 0.85rem;
+		font-size: 0.73rem;
+		color: var(--text-muted);
+		line-height: 1.35;
+	}
+
+	.disc-input-row {
+		display: flex;
+		gap: 0.5rem;
+		margin-bottom: 0.5rem;
+	}
+
+	.disc-text-input {
+		flex: 1;
+		background: var(--surface-2);
+		border: 1px solid var(--border-strong);
+		color: var(--text);
+		border-radius: 8px;
+		padding: 0.5rem 0.75rem;
+		font-family: inherit;
+		font-size: 0.78rem;
+	}
+
+	.disc-text-input:focus {
+		outline: none;
+		border-color: var(--accent);
+	}
+
+	.disc-sub-field {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.7rem;
+		color: var(--text-faint);
+		margin-top: 0.35rem;
+	}
+
+	.disc-small-input {
+		flex: 1;
+		background: var(--surface-2);
+		border: 1px solid var(--border);
+		color: var(--text-soft);
+		border-radius: 6px;
+		padding: 0.25rem 0.5rem;
+		font-size: 0.7rem;
+		font-family: monospace;
+	}
+
+	.action-btn.cyan {
+		border-color: #00d4ff;
+		background: rgba(0, 212, 255, 0.16);
+		color: #00d4ff;
+	}
+
+	.action-btn.busy {
+		opacity: 0.7;
+		cursor: wait;
+	}
+
+	.discovery-results {
+		margin-top: 1rem;
+		padding-top: 1rem;
+		border-top: 1px dashed var(--border);
+	}
+
+	.d-results-banner {
+		font-size: 0.8rem;
+		color: var(--text-soft);
+		margin-bottom: 0.75rem;
+	}
+
+	.d-results-banner small {
+		color: var(--text-faint);
+		margin-left: 0.5rem;
+	}
+
+	.discovered-nodes-row {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+		gap: 0.75rem;
+	}
+
+	.disc-node-card {
+		background: var(--surface-3);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 0.75rem;
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+	}
+
+	.disc-node-card.linked {
+		border-color: rgba(var(--good-rgb), 0.5);
+	}
+
+	.dnc-meta {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+
+	.dnc-id {
+		font-size: 0.85rem;
+		color: var(--text-strong);
+	}
+
+	.dnc-ip {
+		font-family: monospace;
+		font-size: 0.75rem;
+		color: var(--text-muted);
+	}
+
+	.dnc-hw {
+		font-size: 0.7rem;
+		color: var(--text-faint);
+	}
+
+	.linked-tag {
+		color: var(--good);
+		font-size: 0.75rem;
+		font-weight: 700;
+	}
+
 	.admin-shell {
 		min-height: 100vh;
 		padding: 1.25rem 1.75rem;

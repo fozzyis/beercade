@@ -163,7 +163,7 @@ rm -f "$OUT/$IMAGE_NAME.zst" "$OUT/${IMAGE_NAME%.raw}.vhdx"
 if [[ "$IMAGE_COMPRESS" == zstd ]]; then
   # Mostly-empty partitions compress to almost nothing; flash with
   # `zstd -dc <img>.zst | dd of=/dev/sdX bs=4M`.
-  zstd -q -T0 -12 "$IMG" -o "$OUT/$IMAGE_NAME.zst"
+  zstd -q -T2 -9 "$IMG" -o "$OUT/$IMAGE_NAME.zst"
 fi
 # Hyper-V Gen2 (Secure Boot off; the images are unsigned).
 qemu-img convert -f raw -O vhdx -o subformat=dynamic "$IMG" "$OUT/${IMAGE_NAME%.raw}.vhdx"

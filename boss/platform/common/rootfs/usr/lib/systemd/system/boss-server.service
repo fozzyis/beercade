@@ -16,6 +16,8 @@ Environment=BOSS_SYNC_DIR=/data/beercade/sync
 Environment=BOSS_UI_THEME_FILE=/data/beercade/state/ui_theme
 Environment=RUST_LOG=info
 EnvironmentFile=-/data/beercade/boss.env
+StandardOutput=append:/data/beercade/logs/server.log
+StandardError=append:/data/beercade/logs/server.log
 ExecStart=/usr/bin/boss-server
 Restart=on-failure
 RestartSec=3
@@ -23,7 +25,7 @@ LimitNOFILE=65536
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=/data/beercade/sync /data/beercade/state
+ReadWritePaths=/data/beercade/sync /data/beercade/state /data/beercade/logs
 ProtectHome=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes

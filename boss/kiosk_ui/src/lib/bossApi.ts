@@ -1138,3 +1138,110 @@ export function subscribeBossEvents(
 		return () => {};
 	}
 }
+
+
+// ---------------------------------------------------------------------------
+// Fleet Discovery & Rescue Client APIs
+// ---------------------------------------------------------------------------
+
+export interface DiscoveredNode {
+	node_id: string;
+	ip: string;
+	port: number;
+	status: string;
+	connected: boolean;
+	hardware?: string;
+	soc?: string;
+	mode?: string;
+}
+
+export interface DiscoveryReport {
+	scanned_ips: number;
+	arp_entries_found: number;
+	subnets_scanned: string[];
+	nodes: DiscoveredNode[];
+	duration_ms: number;
+	message: string;
+}
+
+export interface NetworkInterfacesReport {
+	interfaces: Array<{
+		name: string;
+		ip: string;
+		subnet: string;
+		is_default: boolean;
+	}>;
+	default_boss_url: string;
+}
+
+export async function forceConnectNode(
+	target: string,
+	bossUrl?: string
+): Promise<{ status: string; message: string; node?: DiscoveredNode; error?: string }> {
+	const base = getApiBase();
+	try {
+		const res = await fetch(`${base}/api/v1/fleet/connect`, {
+			method: 'POST',
+			headers: authHeaders(),
+			body: JSON.stringify({
+				target,
+				boss_url: bossUrl?.trim() || undefined
+			})
+		});
+		return await res.json();
+	} catch (e: any) {
+		return {
+			status: 'error',
+			message: e.message || 'Network error connecting to node',
+			error: e.message || 'Network error connecting to node'
+		};
+	}
+}
+
+export async function discoverFleetNodes(
+	subnet?: string,
+	bossUrl?: string
+): Promise<DiscoveryReport> {
+	const base = getApiBase();
+	try {
+		const res = await fetch(`${base}/api/v1/fleet/discover`, {
+			method: 'POST',
+			headers: authHeaders(),
+			body: JSON.stringify({
+				subnet: subnet?.trim() || undefined,
+				boss_url: bossUrl?.trim() || undefined
+			})
+		});
+		if (res.ok) {
+			return await res.json();
+		}
+		throw new Error(`Server returned ${res.status}`);
+	} catch (e: any) {
+		return {
+			scanned_ips: 0,
+			arp_entries_found: 0,
+			subnets_scanned: [],
+			nodes: [],
+			duration_ms: 0,
+			message: `Discovery scan failed: ${e.message || 'Network error'}`
+		};
+	}
+}
+
+export async function fetchNetworkInterfaces(): Promise<NetworkInterfacesReport> {
+	const base = getApiBase();
+	try {
+		const res = await fetch(`${base}/api/v1/fleet/interfaces`, {
+			headers: authHeaders()
+		});
+		if (res.ok) {
+			return await res.json();
+		}
+	} catch {
+		// fallback
+	}
+	return {
+		interfaces: [],
+		default_boss_url: 'http://boss:8989'
+	};
+}

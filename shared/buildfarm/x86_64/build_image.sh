@@ -13,21 +13,25 @@ PAYLOAD_FILE="$HERE/payloads/$PAYLOAD.conf"
 # shellcheck source=/dev/null
 source "$PAYLOAD_FILE"
 
-# Docker Desktop on Windows needs D:/... paths; pwd -W gives that in Git Bash, wslpath in WSL.
-winpath() {
-  if command -v wslpath >/dev/null 2>&1; then
-    wslpath -m "$1"
-  else
-    (cd "$1" && { pwd -W 2>/dev/null || pwd; })
-  fi
-}
-
 DOCKER="docker"
 if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
   if command -v docker.exe >/dev/null 2>&1 && docker.exe ps >/dev/null 2>&1; then
     DOCKER="docker.exe"
   fi
 fi
+
+# Docker Desktop on Windows needs D:/... paths; pwd -W gives that in Git Bash, wslpath in WSL.
+winpath() {
+  if [[ "$DOCKER" == *.exe ]]; then
+    if command -v wslpath >/dev/null 2>&1; then
+      wslpath -m "$1"
+    else
+      (cd "$1" && { pwd -W 2>/dev/null || pwd; })
+    fi
+  else
+    (cd "$1" && pwd)
+  fi
+}
 mkdir -p "$REPO/out"
 REPO_D="$(winpath "$REPO")"
 OUT_D="$(winpath "$REPO/out")"

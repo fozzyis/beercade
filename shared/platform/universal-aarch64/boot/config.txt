@@ -1,0 +1,20 @@
+# ==============================================================================
+# B.E.E.R.C.A.D.E. Universal AArch64 Boot Configuration (RPi 4 & RPi 5)
+# ==============================================================================
+arm_64bit=1
+enable_uart=1
+max_framebuffers=2
+disable_overscan=1
+disable_splash=1
+initramfs initramfs.img followkernel
+
+[pi4]
+arm_boost=1
+kernel=kernel8.img
+dtoverlay=vc4-kms-v3d
+
+[pi5]
+kernel=kernel8.img
+dtoverlay=vc4-kms-v3d-pi5
+
+[all]
