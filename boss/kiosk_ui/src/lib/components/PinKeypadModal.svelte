@@ -123,7 +123,7 @@
 
 			{#if authTab === 'pin'}
 				<p class="hint">
-					Enter the 6-digit physical kiosk operator PIN (default <code>898900</code>)
+					Enter the 6-digit physical kiosk operator PIN
 				</p>
 
 				<div class="pin-dots" aria-live="polite">

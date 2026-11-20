@@ -7,11 +7,10 @@
 	"vars": {
 		// URL of the B.O.S.S. multiplexed SSE hub behind the Cloudflare Tunnel.
 		// Consumed by /api/v1/edge/stream to proxy live telemetry to browsers.
-		"BOSS_SSE_URL": "http://localhost:8989/api/telemetry/stream",
+		"BOSS_SSE_URL": "http://localhost:8989/api/telemetry/stream"
 		// Shared secret BOSS presents when POSTing batches to /api/v1/edge/ingest.
-		// DEV DEFAULT ONLY — override in production with:
+		// Configure locally via `.dev.vars` or in production with:
 		//   npx wrangler pages secret put EDGE_INGEST_TOKEN
-		"EDGE_INGEST_TOKEN": "bk-dev-edge-token-2026"
 	},
 	"d1_databases": [
 		{

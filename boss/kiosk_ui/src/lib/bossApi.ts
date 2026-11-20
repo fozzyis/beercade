@@ -796,14 +796,17 @@ export async function unlockWithPin(
 		}
 		return { ok: false, detail: data.detail || 'Incorrect 6-digit operator PIN.' };
 	} catch {
-		// Offline preview fallback: accept default operator PIN 898900
-		if (pin.trim() === '898900') {
-			const token = 'boss_sess_preview_offline';
-			const exp = Date.now() + 15 * 60 * 1000;
-			setStoredOperatorToken(token, exp);
-			return { ok: true, token, expires_at_epoch_ms: exp };
+		if (import.meta.env.VITE_DEV_MOCK === 'true') {
+			const mockPin = import.meta.env.VITE_DEV_MOCK_PIN;
+			if (mockPin && pin.trim() === mockPin) {
+				const token = 'boss_sess_preview_offline';
+				const exp = Date.now() + 15 * 60 * 1000;
+				setStoredOperatorToken(token, exp);
+				return { ok: true, token, expires_at_epoch_ms: exp };
+			}
+			return { ok: false, detail: 'Incorrect 6-digit operator PIN.' };
 		}
-		return { ok: false, detail: 'Incorrect 6-digit operator PIN (Default: 898900).' };
+		return { ok: false, detail: 'B.O.S.S. server unreachable' };
 	}
 }
 
@@ -818,9 +821,11 @@ export async function verifyOperatorToken(token: string): Promise<boolean> {
 		}
 		return false;
 	} catch {
-		if (token.trim().length >= 6) {
-			setStoredOperatorToken(token.trim());
-			return true;
+		if (import.meta.env.VITE_DEV_MOCK === 'true') {
+			if (token.trim().length >= 6) {
+				setStoredOperatorToken(token.trim());
+				return true;
+			}
 		}
 		return false;
 	}
