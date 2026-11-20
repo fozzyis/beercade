@@ -20,17 +20,27 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       # The checkout action is JavaScript; the rust image ships without node.
-      - name: Install node for actions
-        run: apt-get update -qq && apt-get install -y -qq nodejs >/dev/null
+      - name: Install build & test dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            nodejs libsdl2-dev libsdl2-ttf-dev cmake g++ ninja-build pkg-config >/dev/null
       - uses: https://data.forgejo.org/actions/checkout@v4
       - name: Check
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo check --workspace --locked
       - name: Test
         run: cargo test --workspace --locked
+      - name: astro_rt CMake build & test
+        run: |
+          cmake -S astro/rt -B /tmp/astro_rt_build -G Ninja
+          cmake --build /tmp/astro_rt_build
+          ctest --test-dir /tmp/astro_rt_build --output-on-failure
       - name: Release build
-        run: cargo build --release --locked -p astro-daemon -p boss-server
+        run: cargo build --release --locked -p astro-daemon -p astro-shell -p astro-tune -p boss-server
       - name: Show binaries
-        run: ls -l target/release/astro-daemon target/release/boss-server
+        run: ls -l target/release/astro-daemon target/release/astro-shell target/release/astro-tune target/release/boss-server
 
   frontends:
     runs-on: x86_64

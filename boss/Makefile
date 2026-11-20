@@ -2,7 +2,7 @@
 # B.O.S.S. Build & Packaging Makefile
 # ==============================================================================
 
-.PHONY: all rock5c rpi4 rpi5 docker install ui check clean
+.PHONY: all rock5c rpi4 rpi5 docker ui check clean
 
 all: rock5c
 
@@ -46,14 +46,6 @@ docker:
 docker-run:
 	@echo "=== Launching B.O.S.S. via Docker Compose ==="
 	docker compose up -d
-
-install: ui daemon
-	@echo "=== Installing B.O.S.S. to Host System ==="
-	sudo bash ./deploy/install_boss.sh
-
-install-kiosk: ui daemon
-	@echo "=== Installing B.O.S.S. with Touchscreen Kiosk UI ==="
-	sudo bash ./deploy/install_boss.sh --with-kiosk
 
 clean:
 	@echo "=== Cleaning Workspace ==="

@@ -9,9 +9,12 @@
 //! Menu key: TAB (MAME's menu key), the gamepad guide button, or START+SELECT
 //! held together.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuInput {
     Toggle,
@@ -21,133 +24,148 @@ pub enum MenuInput {
     Back,
 }
 
-const EV_KEY: u16 = 0x01;
-const EV_ABS: u16 = 0x03;
+#[cfg(any(target_os = "linux", test))]
+mod evdev_map {
+    use super::MenuInput;
 
-const KEY_ESC: u16 = 1;
-const KEY_BACKSPACE: u16 = 14;
-const KEY_TAB: u16 = 15;
-const KEY_ENTER: u16 = 28;
-const KEY_LEFTCTRL: u16 = 29;
-const KEY_LEFTALT: u16 = 56;
-const KEY_UP: u16 = 103;
-const KEY_DOWN: u16 = 108;
-const BTN_TRIGGER: u16 = 0x120;
-const BTN_THUMB: u16 = 0x121;
-const BTN_BASE3: u16 = 0x128;
-const BTN_BASE4: u16 = 0x129;
-const BTN_SOUTH: u16 = 0x130;
-const BTN_EAST: u16 = 0x131;
-const BTN_SELECT: u16 = 0x13a;
-const BTN_START: u16 = 0x13b;
-const BTN_MODE: u16 = 0x13c;
-const BTN_DPAD_UP: u16 = 0x220;
-const BTN_DPAD_DOWN: u16 = 0x221;
-pub const ABS_Y: u16 = 0x01;
-const ABS_HAT0Y: u16 = 0x11;
+    pub(super) const EV_KEY: u16 = 0x01;
+    pub(super) const EV_ABS: u16 = 0x03;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Vertical {
-    Up,
-    Neutral,
-    Down,
-}
+    const KEY_ESC: u16 = 1;
+    const KEY_BACKSPACE: u16 = 14;
+    pub(super) const KEY_TAB: u16 = 15;
+    const KEY_ENTER: u16 = 28;
+    pub(super) const KEY_LEFTCTRL: u16 = 29;
+    pub(super) const KEY_LEFTALT: u16 = 56;
+    const KEY_UP: u16 = 103;
+    pub(super) const KEY_DOWN: u16 = 108;
+    const BTN_TRIGGER: u16 = 0x120;
+    const BTN_THUMB: u16 = 0x121;
+    const BTN_BASE3: u16 = 0x128;
+    const BTN_BASE4: u16 = 0x129;
+    const BTN_SOUTH: u16 = 0x130;
+    const BTN_EAST: u16 = 0x131;
+    pub(super) const BTN_SELECT: u16 = 0x13a;
+    pub(super) const BTN_START: u16 = 0x13b;
+    const BTN_MODE: u16 = 0x13c;
+    const BTN_DPAD_UP: u16 = 0x220;
+    const BTN_DPAD_DOWN: u16 = 0x221;
+    pub const ABS_Y: u16 = 0x01;
+    pub(super) const ABS_HAT0Y: u16 = 0x11;
 
-/// Turns one device's raw events into menu inputs.
-#[derive(Debug)]
-pub struct Mapper {
-    /// ABS_Y range, when the device has one.
-    y_range: Option<(i32, i32)>,
-    y: Vertical,
-    hat: Vertical,
-    start: bool,
-    select: bool,
-    combo_fired: bool,
-}
-
-impl Mapper {
-    pub fn new(y_range: Option<(i32, i32)>) -> Self {
-        Self {
-            y_range,
-            y: Vertical::Neutral,
-            hat: Vertical::Neutral,
-            start: false,
-            select: false,
-            combo_fired: false,
-        }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Vertical {
+        Up,
+        Neutral,
+        Down,
     }
 
-    pub fn feed(&mut self, ev_type: u16, code: u16, value: i32) -> Option<MenuInput> {
-        match ev_type {
-            EV_KEY => self.key(code, value),
-            EV_ABS => self.abs(code, value),
-            _ => None,
-        }
+    /// Turns one device's raw events into menu inputs.
+    #[derive(Debug)]
+    pub struct Mapper {
+        /// ABS_Y range, when the device has one.
+        y_range: Option<(i32, i32)>,
+        y: Vertical,
+        hat: Vertical,
+        start: bool,
+        select: bool,
+        combo_fired: bool,
     }
 
-    fn key(&mut self, code: u16, value: i32) -> Option<MenuInput> {
-        let down = value != 0;
-        match code {
-            BTN_START | BTN_BASE4 => self.start = down,
-            BTN_SELECT | BTN_BASE3 => self.select = down,
-            _ => {}
-        }
-        if self.start && self.select {
-            if !self.combo_fired {
-                self.combo_fired = true;
-                return Some(MenuInput::Toggle);
+    impl Mapper {
+        pub fn new(y_range: Option<(i32, i32)>) -> Self {
+            Self {
+                y_range,
+                y: Vertical::Neutral,
+                hat: Vertical::Neutral,
+                start: false,
+                select: false,
+                combo_fired: false,
             }
-            return None;
         }
-        if !self.start && !self.select {
-            self.combo_fired = false;
-        }
-        // Presses only; autorepeat (2) and release (0) are ignored.
-        if value != 1 {
-            return None;
-        }
-        match code {
-            KEY_TAB | BTN_MODE => Some(MenuInput::Toggle),
-            KEY_UP | BTN_DPAD_UP => Some(MenuInput::Up),
-            KEY_DOWN | BTN_DPAD_DOWN => Some(MenuInput::Down),
-            KEY_ENTER | KEY_LEFTCTRL | BTN_SOUTH | BTN_TRIGGER => Some(MenuInput::Ok),
-            KEY_ESC | KEY_BACKSPACE | KEY_LEFTALT | BTN_EAST | BTN_THUMB => Some(MenuInput::Back),
-            _ => None,
-        }
-    }
 
-    fn abs(&mut self, code: u16, value: i32) -> Option<MenuInput> {
-        let (dir, slot) = match code {
-            ABS_HAT0Y => (value.signum(), &mut self.hat),
-            ABS_Y => {
-                let (min, max) = self.y_range?;
-                let quarter = (max - min) / 4;
-                let dir = if value <= min + quarter {
-                    -1
-                } else if value >= max - quarter {
-                    1
-                } else {
-                    0
-                };
-                (dir, &mut self.y)
+        pub fn feed(&mut self, ev_type: u16, code: u16, value: i32) -> Option<MenuInput> {
+            match ev_type {
+                EV_KEY => self.key(code, value),
+                EV_ABS => self.abs(code, value),
+                _ => None,
             }
-            _ => return None,
-        };
-        let next = match dir {
-            -1 => Vertical::Up,
-            1 => Vertical::Down,
-            _ => Vertical::Neutral,
-        };
-        // Fire on leaving neutral only, like a key press.
-        let fired = *slot == Vertical::Neutral && next != Vertical::Neutral;
-        *slot = next;
-        match (fired, next) {
-            (true, Vertical::Up) => Some(MenuInput::Up),
-            (true, Vertical::Down) => Some(MenuInput::Down),
-            _ => None,
+        }
+
+        fn key(&mut self, code: u16, value: i32) -> Option<MenuInput> {
+            let down = value != 0;
+            match code {
+                BTN_START | BTN_BASE4 => self.start = down,
+                BTN_SELECT | BTN_BASE3 => self.select = down,
+                _ => {}
+            }
+            if self.start && self.select {
+                if !self.combo_fired {
+                    self.combo_fired = true;
+                    return Some(MenuInput::Toggle);
+                }
+                return None;
+            }
+            if !self.start && !self.select {
+                self.combo_fired = false;
+            }
+            // Presses only; autorepeat (2) and release (0) are ignored.
+            if value != 1 {
+                return None;
+            }
+            match code {
+                KEY_TAB | BTN_MODE => Some(MenuInput::Toggle),
+                KEY_UP | BTN_DPAD_UP => Some(MenuInput::Up),
+                KEY_DOWN | BTN_DPAD_DOWN => Some(MenuInput::Down),
+                KEY_ENTER | KEY_LEFTCTRL | BTN_SOUTH | BTN_TRIGGER => Some(MenuInput::Ok),
+                KEY_ESC | KEY_BACKSPACE | KEY_LEFTALT | BTN_EAST | BTN_THUMB => Some(MenuInput::Back),
+                _ => None,
+            }
+        }
+
+        fn abs(&mut self, code: u16, value: i32) -> Option<MenuInput> {
+            let (dir, slot) = match code {
+                ABS_HAT0Y => (value.signum(), &mut self.hat),
+                ABS_Y => {
+                    let (min, max) = self.y_range?;
+                    let quarter = (max - min) / 4;
+                    let dir = if value <= min + quarter {
+                        -1
+                    } else if value >= max - quarter {
+                        1
+                    } else {
+                        0
+                    };
+                    (dir, &mut self.y)
+                }
+                _ => return None,
+            };
+            let next = match dir {
+                -1 => Vertical::Up,
+                1 => Vertical::Down,
+                _ => Vertical::Neutral,
+            };
+            // Fire on leaving neutral only, like a key press.
+            let fired = *slot == Vertical::Neutral && next != Vertical::Neutral;
+            *slot = next;
+            match (fired, next) {
+                (true, Vertical::Up) => Some(MenuInput::Up),
+                (true, Vertical::Down) => Some(MenuInput::Down),
+                _ => None,
+            }
         }
     }
 }
+
+#[cfg(any(target_os = "linux", test))]
+pub use evdev_map::Mapper;
+#[cfg(any(target_os = "linux", test))]
+#[allow(unused_imports)]
+pub use evdev_map::ABS_Y;
+#[cfg(test)]
+use evdev_map::{
+    ABS_HAT0Y, BTN_SELECT, BTN_START, EV_ABS, EV_KEY, KEY_DOWN, KEY_LEFTALT, KEY_LEFTCTRL, KEY_TAB,
+};
 
 /// Watch every input device (hotplug rescans every 5 s) and send menu inputs
 /// to `tx`. `grab` asks the readers to take the devices exclusively.

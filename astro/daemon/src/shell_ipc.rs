@@ -4,12 +4,20 @@
 //! Launching a game stops the service (freeing the display for RetroArch) and
 //! the game's exit starts it again, so the shell holds no state of its own.
 
-use crate::{session, staging, DaemonSharedState};
-use beercade_shared::shell::{ShellAction, ShellFrame, ShellGame, ShellView};
+#[cfg(any(target_os = "linux", test))]
+use crate::session;
+#[cfg(target_os = "linux")]
+use crate::staging;
+use crate::DaemonSharedState;
+#[cfg(target_os = "linux")]
+use beercade_shared::shell::ShellAction;
+#[cfg(any(target_os = "linux", test))]
+use beercade_shared::shell::{ShellFrame, ShellGame, ShellView};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// What the shell should show for the current daemon state.
+#[cfg(any(target_os = "linux", test))]
 pub fn frame(st: &DaemonSharedState) -> ShellFrame {
     let view = match &st.session {
         Some(s) => match &s.phase {
@@ -45,6 +53,7 @@ pub fn frame(st: &DaemonSharedState) -> ShellFrame {
 }
 
 /// Act on what the player picked.
+#[cfg(target_os = "linux")]
 async fn handle(state_arc: &Arc<RwLock<DaemonSharedState>>, client: &reqwest::Client, action: ShellAction) {
     match action {
         ShellAction::Launch { game_id } => {

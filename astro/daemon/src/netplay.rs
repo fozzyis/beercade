@@ -1684,6 +1684,7 @@ pub struct SyntheticCore {
     acc: u64,
 }
 
+#[cfg(test)]
 impl SyntheticCore {
     pub fn with_acc(acc: u64) -> Self {
         SyntheticCore { acc }

@@ -2,12 +2,24 @@
 # Host-side entry point for Raspberry Pi 4/5 images (Git Bash on Windows, or
 # Linux; Docker with arm64 emulation required: Docker Desktop has it, on Linux
 # install qemu-user-static/binfmt).
-#   bash shared/buildfarm/aarch64/build_image.sh [payload]   (default: boss)
+#   bash shared/buildfarm/aarch64/build_image.sh [--reuse-artifacts] [payload]   (default: boss)
 # Output: out/<IMAGE_NAME> in the repo root.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
-PAYLOAD="${1:-boss}"
+REUSE_ARTIFACTS=0
+PAYLOAD="boss"
+for arg in "$@"; do
+  case "$arg" in
+    --reuse-artifacts) REUSE_ARTIFACTS=1 ;;
+    -h|--help)
+      echo "usage: $0 [--reuse-artifacts] [payload]"
+      exit 0
+      ;;
+    *) PAYLOAD="$arg" ;;
+  esac
+done
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 PAYLOAD_FILE="$HERE/payloads/$PAYLOAD.conf"
@@ -22,10 +34,14 @@ OUT_D="$(winpath "$REPO/out")"
 BIN_SUB="bin-$PAYLOAD_NAME-aarch64"
 FE_SUB="fe-$PAYLOAD_NAME-aarch64"
 [[ -v FRONTEND_BUILDS ]] || FRONTEND_BUILDS=()
+[[ -v CARGO_APT_PACKAGES ]] || CARGO_APT_PACKAGES=()
 
 banner() { printf '\n==== %s ====\n' "$*"; }
 
 banner "payload $PAYLOAD_NAME (aarch64) -> out/$IMAGE_NAME"
+if ((!REUSE_ARTIFACTS)); then
+  rm -rf "${REPO:?}/out/$BIN_SUB" "${REPO:?}/out/$FE_SUB"
+fi
 mkdir -p "$REPO/out/$BIN_SUB" "$REPO/out/$FE_SUB"
 
 # Native arm64 build under emulation: slow (tens of minutes cold) but needs no
@@ -44,8 +60,12 @@ if ((${#CARGO_PACKAGES[@]})); then
       -v beercade-arm-cargo-registry:/usr/local/cargo/registry \
       -e CARGO_TARGET_DIR=/target \
       -e BIN_SUB="$BIN_SUB" \
+      -e APT_PACKAGES="${CARGO_APT_PACKAGES[*]}" \
       -w /src rust:1-bookworm \
       bash -euo pipefail -c '
+        if [[ -n "$APT_PACKAGES" ]]; then
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends $APT_PACKAGES >/dev/null
+        fi
         args=(); for p in "$@"; do args+=(-p "$p"); done
         cargo build --release --locked "${args[@]}"
         for p in "$@"; do install -m 0755 "/target/release/$p" "/out/$BIN_SUB/$p"; done

@@ -15,3 +15,12 @@ target_link_libraries(astro_rt PUBLIC pthread)
 
 # Ensure strict compilation
 target_compile_options(astro_rt PRIVATE -Wall -Wextra -Werror -O3)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(astro_rt_spsc_test tests/spsc_ring_test.cpp)
+    target_include_directories(astro_rt_spsc_test PRIVATE include)
+    target_link_libraries(astro_rt_spsc_test PRIVATE pthread)
+    target_compile_options(astro_rt_spsc_test PRIVATE -Wall -Wextra -Werror -O3)
+    add_test(NAME astro_rt_spsc_test COMMAND astro_rt_spsc_test)
+endif()

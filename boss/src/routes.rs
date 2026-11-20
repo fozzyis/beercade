@@ -1175,6 +1175,7 @@ pub async fn cabinet_events(
 }
 
 /// Construct the complete Axum Router for B.O.S.S. Server.
+#[cfg(test)]
 pub fn build_router(state: SharedState) -> axum::Router {
     build_router_with_relay(state, std::sync::Arc::new(crate::netplay_relay::RelayState::new()))
 }

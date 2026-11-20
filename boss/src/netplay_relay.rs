@@ -32,6 +32,7 @@ use tracing::{debug, info, warn};
 // --- wire constants (MIRROR of astro-daemon netplay.rs — keep in sync) -----
 const MAGIC: [u8; 2] = [0x4F, 0x52]; // "OR"
 const HEADER_LEN: usize = 12;
+#[allow(dead_code)] // full protocol mirror — relay parses a subset
 const MSG_INPUT: u8 = 0x01;
 #[allow(dead_code)] // full protocol mirror — relay parses a subset
 const MSG_PING: u8 = 0x02;

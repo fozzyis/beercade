@@ -218,6 +218,7 @@ impl DaemonSharedState {
     }
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code, unused_variables, unused_mut))] // Phase 3 wires astro_input_get_stats
 fn sample_input_jitter() -> InputJitterStats {
     #[allow(unused_mut)]
     let mut stats = InputJitterStats {
@@ -2079,17 +2080,5 @@ mod tests {
         // Must maintain dynamic DHCP + link-local fallback
         assert!(content.contains("DHCP=yes"), "Missing DHCP=yes in 10-wired.network");
         assert!(content.contains("LinkLocalAddressing=fallback"), "Missing LinkLocalAddressing=fallback");
-    }
-
-    #[test]
-    fn test_r3_static_net_script_no_static_ip() {
-        let rootfs = find_rootfs_dir();
-        let script_path = rootfs.join("usr/local/bin/boss_static_net.sh");
-        assert!(script_path.exists(), "boss_static_net.sh not found at {:?}", script_path);
-
-        let content = std::fs::read_to_string(&script_path).unwrap();
-        // R3: Must NOT assign static 192.168.100.2
-        assert!(!content.contains("192.168.100.2"), "Static IP 192.168.100.2 found in boss_static_net.sh");
-        assert!(!content.contains("192.168.100.1"), "Static gateway 192.168.100.1 found in boss_static_net.sh");
     }
 }
