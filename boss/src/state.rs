@@ -75,6 +75,13 @@ pub struct Config {
     pub node_token: String,
     /// 6-digit physical kiosk operator PIN for Dual-Mode touch unlock.
     pub operator_pin: String,
+    /// Optional dedicated key for signing `:8990` A.S.T.R.O. discovery directives
+    /// (falls back to `node_token` when unset).
+    pub discovery_key: Option<String>,
+    /// Explicitly trusted reverse-proxy peer IPs allowed to forward
+    /// `CF-Connecting-IP` / `X-Forwarded-For` / `X-Real-IP` (`127.0.0.1`/`::1`
+    /// are always trusted).
+    pub trusted_proxies: Vec<std::net::IpAddr>,
     /// Cloudflare Worker ingest endpoint (over the tunnel), if cloud sync is on.
     pub edge_ingest_url: Option<String>,
     pub edge_ingest_token: String,
@@ -87,8 +94,7 @@ impl Config {
             _ => {
                 let generated = uuid::Uuid::new_v4().to_string();
                 tracing::warn!(
-                    token = %generated,
-                    "BOSS_RPC_TOKEN not set - generated an ephemeral token for this boot"
+                    "BOSS_RPC_TOKEN not set - generated an ephemeral RPC token for this boot"
                 );
                 generated
             }
@@ -97,18 +103,38 @@ impl Config {
         let node_token = match std::env::var("BOSS_NODE_TOKEN") {
             Ok(t) if !t.trim().is_empty() => t,
             _ => {
+                let generated = uuid::Uuid::new_v4().to_string();
                 tracing::warn!(
-                    "BOSS_NODE_TOKEN not set - falling back to BOSS_RPC_TOKEN for node auth \
-                     (set BOSS_NODE_TOKEN to isolate the node ingest credential)"
+                    "BOSS_NODE_TOKEN not set - generated an ephemeral node token for this boot \
+                     (provision BOSS_NODE_TOKEN in boss.env for persistent cabinet auth)"
                 );
-                rpc_token.clone()
+                generated
             }
         };
 
         let operator_pin = match std::env::var("BOSS_OPERATOR_PIN") {
             Ok(p) if !p.trim().is_empty() => p.trim().to_string(),
-            _ => "898900".to_string(),
+            _ => {
+                tracing::warn!(
+                    "BOSS_OPERATOR_PIN unset; operator PIN login disabled until provisioned in boss.env"
+                );
+                String::new()
+            }
         };
+
+        let discovery_key = std::env::var("BOSS_DISCOVERY_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+
+        let trusted_proxies = std::env::var("BOSS_TRUSTED_PROXIES")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .filter_map(|s| s.trim().parse::<std::net::IpAddr>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let edge_ingest_url = std::env::var("EDGE_INGEST_URL")
             .ok()
@@ -123,6 +149,8 @@ impl Config {
             rpc_token,
             node_token,
             operator_pin,
+            discovery_key,
+            trusted_proxies,
             edge_ingest_url,
             edge_ingest_token: std::env::var("EDGE_INGEST_TOKEN").unwrap_or_default(),
         }

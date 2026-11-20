@@ -27,6 +27,11 @@ extern "C" {
 #define ASTRO_INPUT_MAX_AXES        8    /* abs axes tracked per device        */
 #define ASTRO_INPUT_DRAIN_MAX       256  /* per-frame drain batch limit        */
 
+#define ASTRO_RT_STATS_SHM_NAME     "/astro_rt_stats"
+#define ASTRO_RT_STATS_MAGIC        0x415354524F525431ULL /* "ASTRORT1" */
+#define ASTRO_RT_STATS_VERSION      1u
+#define ASTRO_RT_HIST_BUCKETS       32
+
 /* libretro-compatible button bit positions (RETRO_DEVICE_ID_JOYPAD_*) */
 enum astro_pad_buttons {
     ASTRO_BTN_B      = 0,  ASTRO_BTN_Y      = 1,  ASTRO_BTN_SELECT = 2,
@@ -82,6 +87,44 @@ struct astro_input_stats {
     uint32_t last_wake_latency_us; /* ppoll wake -> last event handled     */
 };
 
+/* POSIX shared-memory telemetry snapshot at /dev/shm/astro_rt_stats
+ * (ASTRO_RT_STATS_SHM_NAME), read lock-free by astro-daemon.
+ *
+ * Fixed 184-byte ABI layout (zero implicit padding):
+ *   offset   0 (8B): magic           = ASTRO_RT_STATS_MAGIC
+ *   offset   8 (4B): version         = ASTRO_RT_STATS_VERSION
+ *   offset  12 (4B): seq             = seqlock (odd = write active, even = stable)
+ *   offset  16 (4B): poll_rate_hz    = nominal polling loop rate in Hz
+ *   offset  20 (4B): p50_us          = 50th percentile wake-to-event latency (us)
+ *   offset  24 (4B): p95_us          = 95th percentile wake-to-event latency (us)
+ *   offset  28 (4B): p99_us          = 99th percentile wake-to-event latency (us)
+ *   offset  32 (4B): max_us          = maximum wake-to-event latency observed (us)
+ *   offset  36 (4B): events_total    = transitions accepted into the SPSC ring
+ *   offset  40 (4B): events_dropped  = SPSC ring-full drops
+ *   offset  44 (4B): devices_active  = currently open evdev fds
+ *   offset  48 (4B): hotplug_adds    = cumulative runtime inotify adds
+ *   offset  52 (4B): hotplug_removes = cumulative runtime device removals
+ *   offset  56 (128B): buckets[32]   = log2 latency histogram in microseconds:
+ *                                      bucket 0 = [0, 1] us,
+ *                                      bucket b = [1<<b, (1<<(b+1))-1] us
+ */
+struct astro_input_shm_stats {
+    uint64_t magic;
+    uint32_t version;
+    uint32_t seq;
+    uint32_t poll_rate_hz;
+    uint32_t p50_us;
+    uint32_t p95_us;
+    uint32_t p99_us;
+    uint32_t max_us;
+    uint32_t events_total;
+    uint32_t events_dropped;
+    uint32_t devices_active;
+    uint32_t hotplug_adds;
+    uint32_t hotplug_removes;
+    uint32_t buckets[ASTRO_RT_HIST_BUCKETS];
+};
+
 /* ---- lifecycle ---------------------------------------------------------- */
 
 /* Bring up the RT polling thread and enumerate existing /dev/input/event*.
@@ -110,6 +153,18 @@ int16_t astro_input_axis(unsigned port, unsigned axis);
 /* ---- telemetry ----------------------------------------------------------- */
 
 void astro_input_get_stats(struct astro_input_stats* out);
+
+/* Scale raw EV_ABS value from [minimum, maximum] linearly into [-32768, 32767].
+ * Returns 0 when maximum <= minimum; clamps out-of-range inputs cleanly. */
+int16_t astro_input_scale_abs(int32_t value, int32_t minimum, int32_t maximum);
+
+/* Compute p50, p95, and p99 microsecond latency values from log2 buckets where
+ * bucket 0 covers [0, 1] us and bucket b covers [1<<b, (1<<(b+1))-1] us. */
+void astro_input_compute_percentiles(const uint32_t* buckets,
+                                     unsigned num_buckets,
+                                     uint32_t* p50_us,
+                                     uint32_t* p95_us,
+                                     uint32_t* p99_us);
 
 /* Library identity, for RetroArch driver registration asserts. */
 const char* astro_input_ident(void);

@@ -117,6 +117,10 @@ pub const GPU_TEMP_LIMIT_C: f32 = 90.0;
 pub const CPU_TEMP_HYST_C: f32 = 75.0;
 pub const GPU_TEMP_HYST_C: f32 = 80.0;
 pub const DEFAULT_STATE_CHUNK: usize = 1_024;
+pub const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CHUNKS: u16 = 16_384;
+const MAX_FRAME: u32 = u32::MAX - 3_600;
+const MAX_STEP_US: f64 = 60_000_000.0;
 pub const NEUTRAL_INPUT: InputWord = 0;
 /// Drift controller gains (Jury-stable for G = frames per sync sample:
 /// 0 < ki < kp < 2/G; with G=15: 0 < 0.008 < 0.05 < 0.133).
@@ -254,23 +258,27 @@ impl<'a> Cursor<'a> {
         Some(v)
     }
     fn u16(&mut self) -> Option<u16> {
-        let s = self.buf.get(self.pos..self.pos + 2)?;
-        self.pos += 2;
-        Some(u16::from_le_bytes(s.try_into().unwrap()))
+        let end = self.pos.checked_add(2)?;
+        let s = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        s.try_into().ok().map(u16::from_le_bytes)
     }
     fn u32(&mut self) -> Option<u32> {
-        let s = self.buf.get(self.pos..self.pos + 4)?;
-        self.pos += 4;
-        Some(u32::from_le_bytes(s.try_into().unwrap()))
+        let end = self.pos.checked_add(4)?;
+        let s = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        s.try_into().ok().map(u32::from_le_bytes)
     }
     fn u64(&mut self) -> Option<u64> {
-        let s = self.buf.get(self.pos..self.pos + 8)?;
-        self.pos += 8;
-        Some(u64::from_le_bytes(s.try_into().unwrap()))
+        let end = self.pos.checked_add(8)?;
+        let s = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        s.try_into().ok().map(u64::from_le_bytes)
     }
     fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
-        let s = self.buf.get(self.pos..self.pos + n)?;
-        self.pos += n;
+        let end = self.pos.checked_add(n)?;
+        let s = self.buf.get(self.pos..end)?;
+        self.pos = end;
         Some(s)
     }
 }
@@ -404,7 +412,7 @@ impl Packet {
             return None;
         }
         let mut c = Cursor::new(&buf[HEADER_LEN..]);
-        let session_id = u64::from_le_bytes(buf[4..12].try_into().unwrap());
+        let session_id = u64::from_le_bytes(buf.get(4..12)?.try_into().ok()?);
         let pkt = match buf[3] {
             msg::INPUT => {
                 let base_frame = c.u32()?;
@@ -487,7 +495,7 @@ impl Default for NetplayConfig {
         NetplayConfig {
             session_id: 1,
             bind_port: 9750,
-            peer_addr: "127.0.0.1:9751".parse().unwrap(),
+            peer_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 9751)),
             local_player: 0,
             is_host: true,
             node_id: "ORION-01".to_string(),
@@ -542,7 +550,8 @@ pub struct FrameHistory {
 
 impl FrameHistory {
     pub fn new(capacity: usize, state_len: usize) -> Self {
-        let slots = (0..capacity)
+        let cap = capacity.max(1);
+        let slots = (0..cap)
             .map(|_| FrameSlot {
                 frame: 0,
                 local_input: 0,
@@ -688,16 +697,16 @@ pub struct SyncSample {
 
 impl SyncSample {
     pub fn rtt_us(&self) -> f64 {
-        // Signed arithmetic: t2/t3 come from the PEER's clock, so naive
-        // u64 subtraction can underflow when clocks differ.
-        let a = (self.t4 as i64).wrapping_sub(self.t1 as i64);
-        let b = (self.t3 as i64).wrapping_sub(self.t2 as i64);
+        // Signed arithmetic in i128: t2/t3 come from the PEER's clock, so naive
+        // u64 subtraction can underflow and i64 differences can overflow.
+        let a = (self.t4 as i64).wrapping_sub(self.t1 as i64) as i128;
+        let b = (self.t3 as i64).wrapping_sub(self.t2 as i64) as i128;
         (a - b) as f64
     }
     /// Remote clock minus local clock (positive = remote ahead).
     pub fn offset_us(&self) -> f64 {
-        let a = (self.t2 as i64).wrapping_sub(self.t1 as i64);
-        let b = (self.t3 as i64).wrapping_sub(self.t4 as i64);
+        let a = (self.t2 as i64).wrapping_sub(self.t1 as i64) as i128;
+        let b = (self.t3 as i64).wrapping_sub(self.t4 as i64) as i128;
         (a + b) as f64 / 2.0
     }
 }
@@ -851,12 +860,15 @@ pub struct RollbackSession<C: DeterministicCore> {
 impl<C: DeterministicCore> RollbackSession<C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        cfg: NetplayConfig,
+        mut cfg: NetplayConfig,
         socket: Arc<UdpSocket>,
         core: C,
         input_fn: InputFn,
         boss_url: Option<String>,
     ) -> Self {
+        cfg.history_frames = cfg.history_frames.max(1);
+        cfg.state_chunk_size = cfg.state_chunk_size.max(1);
+        cfg.frame_duration_us = cfg.frame_duration_us.max(1_000);
         let state_len = core.state_bytes();
         let now = TokioInstant::now();
         let clock_sync = interval_at(
@@ -983,7 +995,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
                 0.0
             },
             final_clock_offset_us: self.drift.offset_us(),
-            final_state_hash: crc32(&img[..n]),
+            final_state_hash: crc32(img.get(..n).unwrap_or(&[])),
             health: self.health,
             end_reason: if self.reason.is_empty() {
                 "session ended".to_string()
@@ -1025,7 +1037,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
             if self.local_pending.len() > 1_024 {
                 self.local_pending.pop_front();
             }
-            self.current_frame = f + 1;
+            self.current_frame = f.saturating_add(1);
             self.win_frames += 1;
             self.send_frozen_inputs(f).await;
             return;
@@ -1052,12 +1064,12 @@ impl<C: DeterministicCore> RollbackSession<C> {
         self.core.advance(pair);
 
         let n = self.core.save(&mut self.scratch);
-        let hash = crc32(&self.scratch[..n]);
+        let hash = crc32(self.scratch.get(..n).unwrap_or(&[]));
         if let Some(slot) = self.history.slot_mut(f) {
             slot.post_hash = hash;
         }
 
-        self.current_frame = f + 1;
+        self.current_frame = f.saturating_add(1);
         self.frames_simulated += 1;
         self.win_frames += 1;
 
@@ -1103,22 +1115,29 @@ impl<C: DeterministicCore> RollbackSession<C> {
         }
         for f in target..self.current_frame {
             let (local, remote_known) = {
-                let slot = self.history.slot_mut(f).expect("checked before load");
+                let Some(slot) = self.history.slot_mut(f) else {
+                    self.begin_hard_resync().await;
+                    return;
+                };
                 (slot.local_input, slot.remote_input)
             };
             let remote = remote_known.unwrap_or(self.remote_last_input);
             let pair = if self.cfg.local_player == 0 { [local, remote] } else { [remote, local] };
             let pre_state = {
-                let slot = self.history.slot_mut(f).expect("checked before load");
+                let Some(slot) = self.history.slot_mut(f) else {
+                    self.begin_hard_resync().await;
+                    return;
+                };
                 &mut slot.pre_state
             };
             let _ = self.core.save(pre_state);
             self.core.advance(pair);
             let n = self.core.save(&mut self.scratch);
-            let hash = crc32(&self.scratch[..n]);
-            let slot = self.history.slot_mut(f).expect("checked before load");
-            slot.post_hash = hash;
-            slot.predicted = remote_known.is_none();
+            let hash = crc32(self.scratch.get(..n).unwrap_or(&[]));
+            if let Some(slot) = self.history.slot_mut(f) {
+                slot.post_hash = hash;
+                slot.predicted = remote_known.is_none();
+            }
         }
         self.rollbacks += 1;
         debug!(target, current = self.current_frame, rollbacks = self.rollbacks,
@@ -1147,26 +1166,34 @@ impl<C: DeterministicCore> RollbackSession<C> {
             Packet::Pong { t1, t2, t3 } => {
                 let t4 = now_epoch_us();
                 let sample = SyncSample { t1, t2, t3, t4 };
-                if sample.rtt_us() <= RTT_MAX_US {
-                    let u = self.drift.observe(sample.offset_us());
-                    // Slew the frame pacing interval; clamp keeps us inside
-                    // the ±0.5 ms/frame actuator range.
-                    self.pacing_us =
-                        (self.cfg.frame_duration_us as f64 + u).round().max(1_000.0) as u64;
-                    // Phase too far off for slewing: one-shot step of the
-                    // frame deadline (never the wall clock).
-                    if let Some(step_us) = self.drift.step_correction_needed() {
-                        let step = step_us.round() as i64;
-                        warn!(offset_us = sample.offset_us(), step,
-                              "clock sync: applying phase step");
-                        if step >= 0 {
-                            self.next_deadline += TokioDuration::from_micros(step as u64);
-                        } else {
-                            self.next_deadline -= TokioDuration::from_micros((-step) as u64);
+                let rtt = sample.rtt_us();
+                if rtt.is_finite() && (0.0..=RTT_MAX_US).contains(&rtt) {
+                    let offset = sample.offset_us();
+                    if offset.is_finite() {
+                        let u = self.drift.observe(offset);
+                        // Slew the frame pacing interval; clamp keeps us inside
+                        // the ±0.5 ms/frame actuator range.
+                        self.pacing_us =
+                            (self.cfg.frame_duration_us as f64 + u).round().max(1_000.0) as u64;
+                        // Phase too far off for slewing: one-shot step of the
+                        // frame deadline (never the wall clock).
+                        if let Some(step_us) = self.drift.step_correction_needed() {
+                            let step = step_us.clamp(-MAX_STEP_US, MAX_STEP_US).round() as i64;
+                            warn!(offset_us = offset, step, "clock sync: applying phase step");
+                            let dur = TokioDuration::from_micros(step.unsigned_abs());
+                            self.next_deadline = if step >= 0 {
+                                self.next_deadline
+                                    .checked_add(dur)
+                                    .unwrap_or_else(TokioInstant::now)
+                            } else {
+                                self.next_deadline
+                                    .checked_sub(dur)
+                                    .unwrap_or_else(TokioInstant::now)
+                            };
                         }
+                        debug!(offset_us = offset, rtt_us = rtt, u, pacing_us = self.pacing_us,
+                               "clock sync sample");
                     }
-                    debug!(offset_us = sample.offset_us(), rtt_us = sample.rtt_us(), u,
-                           pacing_us = self.pacing_us, "clock sync sample");
                 }
             }
             Packet::DesyncReport { frame, local_hash, remote_hash } => {
@@ -1200,7 +1227,12 @@ impl<C: DeterministicCore> RollbackSession<C> {
 
         let mut min_correction: Option<u32> = None;
         for (i, &input) in inputs.iter().enumerate() {
-            let frame = base_frame + i as u32;
+            let Some(frame) = base_frame.checked_add(i as u32) else {
+                continue;
+            };
+            if frame > MAX_FRAME {
+                continue;
+            }
             if frame >= now {
                 // Early arrival: queue for the frame clock to catch up.
                 self.remote_future.insert(frame, input);
@@ -1283,7 +1315,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
         let n = self.core.save(&mut self.scratch);
         self.send(Packet::DesyncReport {
             frame: self.current_frame,
-            local_hash: crc32(&self.scratch[..n]),
+            local_hash: crc32(self.scratch.get(..n).unwrap_or(&[])),
             remote_hash: 0,
         })
         .await;
@@ -1297,9 +1329,20 @@ impl<C: DeterministicCore> RollbackSession<C> {
         // Serve the host's *current* state S(G) at host frame G. The guest
         // jumps forward to G; frames are never rewritten, only skipped.
         let n = self.core.save(&mut self.scratch);
-        let state = self.scratch[..n].to_vec();
-        let total = ((state.len() + self.cfg.state_chunk_size - 1) / self.cfg.state_chunk_size)
-            .max(1) as u16;
+        let state = self.scratch.get(..n).unwrap_or(&[]).to_vec();
+        if state.len() > MAX_STATE_BYTES {
+            error!(bytes = state.len(), max = MAX_STATE_BYTES, "state transfer exceeds maximum size");
+            return;
+        }
+        let chunk_sz = self.cfg.state_chunk_size.max(1);
+        let total_usize = state.len().div_ceil(chunk_sz).max(1);
+        if total_usize > MAX_CHUNKS as usize {
+            error!(total_chunks = total_usize, max = MAX_CHUNKS, "state transfer exceeds MAX_CHUNKS");
+            return;
+        }
+        let Ok(total) = u16::try_from(total_usize) else {
+            return;
+        };
         let transfer_id = now_epoch_us() as u32;
         warn!(
             guest_hash = format!("{local_hash:#010x}"),
@@ -1322,8 +1365,12 @@ impl<C: DeterministicCore> RollbackSession<C> {
         if tx.next_chunk >= tx.total {
             return;
         }
-        let start = tx.next_chunk as usize * self.cfg.state_chunk_size;
-        let end = (start + self.cfg.state_chunk_size).min(tx.data.len());
+        let chunk_sz = self.cfg.state_chunk_size.max(1);
+        let start = (tx.next_chunk as usize).saturating_mul(chunk_sz);
+        if start > tx.data.len() {
+            return;
+        }
+        let end = start.saturating_add(chunk_sz).min(tx.data.len());
         let pkt = Packet::StateChunk {
             transfer_id: tx.transfer_id,
             frame: tx.frame,
@@ -1332,8 +1379,9 @@ impl<C: DeterministicCore> RollbackSession<C> {
             data: tx.data[start..end].to_vec(),
         };
         self.send(pkt).await;
-        let tx = self.tx.as_mut().unwrap();
-        tx.next_chunk += 1;
+        if let Some(tx) = self.tx.as_mut() {
+            tx.next_chunk = tx.next_chunk.saturating_add(1);
+        }
     }
 
     /// Guest side: reassemble chunks and jump to the host's frame G.
@@ -1348,26 +1396,45 @@ impl<C: DeterministicCore> RollbackSession<C> {
         if !self.frozen {
             return; // only expected while frozen
         }
+        if total_chunks == 0 || total_chunks > MAX_CHUNKS || chunk_idx >= total_chunks {
+            warn!(chunk_idx, total_chunks, "rejected malformed StateChunk bounds");
+            return;
+        }
+        if frame > MAX_FRAME {
+            warn!(frame, "rejected StateChunk with near-u32::MAX frame");
+            return;
+        }
+        let chunk_sz = self.cfg.state_chunk_size.max(1);
+        let Some(expected_cap) = (total_chunks as usize).checked_mul(chunk_sz) else {
+            warn!(total_chunks, "rejected StateChunk size multiplication overflow");
+            return;
+        };
+        if expected_cap > MAX_STATE_BYTES || data.len() > MAX_DATAGRAM {
+            warn!(expected_cap, chunk_len = data.len(), "rejected oversized StateChunk transfer");
+            return;
+        }
+
         match &mut self.rx {
             Some(rx) if rx.transfer_id == transfer_id => {
+                if rx.total != total_chunks || rx.frame != frame {
+                    warn!(transfer_id, "rejected mismatched StateChunk header");
+                    return;
+                }
                 if (chunk_idx as usize) < rx.chunks.len() && rx.chunks[chunk_idx as usize].is_none() {
                     rx.chunks[chunk_idx as usize] = Some(data);
                     rx.received += 1;
                 }
             }
             _ => {
+                let mut chunks: Vec<Option<Vec<u8>>> = (0..total_chunks).map(|_| None).collect();
+                chunks[chunk_idx as usize] = Some(data);
                 self.rx = Some(TransferRx {
                     transfer_id,
                     frame,
                     total: total_chunks,
-                    chunks: (0..total_chunks).map(|_| None).collect(),
-                    received: 0,
+                    chunks,
+                    received: 1,
                 });
-                if chunk_idx < total_chunks {
-                    let rx = self.rx.as_mut().unwrap();
-                    rx.chunks[chunk_idx as usize] = Some(data);
-                    rx.received += 1;
-                }
             }
         }
 
@@ -1375,8 +1442,20 @@ impl<C: DeterministicCore> RollbackSession<C> {
         if !done {
             return;
         }
-        let rx = self.rx.take().unwrap();
-        let mut image = Vec::with_capacity(rx.total as usize * self.cfg.state_chunk_size);
+        let Some(rx) = self.rx.take() else {
+            return;
+        };
+        let total_len: usize = rx
+            .chunks
+            .iter()
+            .filter_map(|c| c.as_ref().map(Vec::len))
+            .sum();
+        if total_len > MAX_STATE_BYTES {
+            error!(total_len, "state transfer payload exceeded MAX_STATE_BYTES");
+            self.end(HealthState::LocalMode, "state transfer oversized");
+            return;
+        }
+        let mut image = Vec::with_capacity(total_len.min(expected_cap));
         for chunk in &rx.chunks {
             match chunk {
                 Some(c) => image.extend_from_slice(c),
@@ -1447,13 +1526,13 @@ impl<C: DeterministicCore> RollbackSession<C> {
         if inputs.is_empty() {
             return;
         }
-        let base = frame + 1 - inputs.len() as u32;
+        let base = frame.saturating_sub(inputs.len() as u32 - 1);
         // Advertise the most recent CONFIRMED frame's hash (never a
         // provisional predicted state) so the peer's INV-1 cross-check
         // always compares apples to apples.
         let mut probe = frame;
         let mut slot_info: Option<(u32, u32, bool)> = None;
-        while probe + 24 > frame {
+        while frame.saturating_sub(probe) < 24 {
             if probe < self.resync_floor {
                 break; // stale pre-transfer history: never advertise
             }
@@ -1494,7 +1573,7 @@ impl<C: DeterministicCore> RollbackSession<C> {
         if tail.is_empty() {
             return;
         }
-        let base = frame + 1 - tail.len() as u32;
+        let base = frame.saturating_sub(tail.len() as u32 - 1);
         self.send(Packet::Input {
             base_frame: base,
             inputs: tail.into_iter().rev().collect(),
@@ -1706,10 +1785,11 @@ impl StateSave for SyntheticCore {
 
 impl StateLoad for SyntheticCore {
     fn load(&mut self, src: &[u8]) -> Result<(), NetplayError> {
-        if src.len() < 8 {
-            return Err(NetplayError::StateMalformed);
-        }
-        self.acc = u64::from_le_bytes(src[..8].try_into().unwrap());
+        let bytes: [u8; 8] = src
+            .get(..8)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(NetplayError::StateMalformed)?;
+        self.acc = u64::from_le_bytes(bytes);
         Ok(())
     }
 }
@@ -2041,6 +2121,82 @@ mod tests {
         assert!(out_a.hash_cross_checks > 0);
         assert!(out_b.hash_cross_checks > 0);
         assert!(out_b.frames_simulated >= 50, "B simulated {} frames", out_b.frames_simulated);
+    }
+
+    #[tokio::test]
+    async fn adversarial_packets_and_zero_config_never_panic() {
+        let sock = Arc::new(UdpSocket::bind(("127.0.0.1", 0)).await.unwrap());
+        let mut cfg = cfg_for(sock.local_addr().unwrap().port(), 0, 1, false);
+        cfg.history_frames = 0;
+        cfg.state_chunk_size = 0;
+        cfg.frame_duration_us = 0;
+        let mut sess = RollbackSession::new(cfg, sock, SyntheticCore::default(), test_input(1), None);
+        let peer: SocketAddr = ([127, 0, 0, 1], 9999).into();
+
+        // 1. Packet::Input near u32::MAX (base_frame = u32::MAX, inputs.len() = 4)
+        let pkt_in = Packet::Input {
+            base_frame: u32::MAX,
+            inputs: vec![1, 2, 3, 4],
+            hash_frame: u32::MAX,
+            hash: 0xDEAD_BEEF,
+            hash_confirmed: 1,
+        };
+        let bytes_in = pkt_in.encode(sess.cfg.session_id);
+        sess.on_datagram(bytes_in.len(), &bytes_in, peer).await;
+
+        // 2. Packet::Pong with extreme skewed timestamps & negative RTT
+        let pkt_pong = Packet::Pong {
+            t1: 1_000,
+            t2: u64::MAX,
+            t3: 0,
+        };
+        let bytes_pong = pkt_pong.encode(sess.cfg.session_id);
+        sess.on_datagram(bytes_pong.len(), &bytes_pong, peer).await;
+
+        // 3. Packet::StateChunk with total_chunks = 0, total_chunks = u16::MAX, and frame = u32::MAX while frozen
+        sess.frozen = true;
+        for (frame, total_chunks, chunk_idx) in [
+            (10, 0u16, 0u16),
+            (10, u16::MAX, 0),
+            (u32::MAX, 2, 0),
+            (10, 2, 5),
+        ] {
+            let pkt_chunk = Packet::StateChunk {
+                transfer_id: 99,
+                frame,
+                chunk_idx,
+                total_chunks,
+                data: vec![0xAA; 16],
+            };
+            let bytes = pkt_chunk.encode(sess.cfg.session_id);
+            sess.on_datagram(bytes.len(), &bytes, peer).await;
+        }
+        assert!(sess.rx.is_none());
+
+        // 4. Advance near MAX_FRAME without overflow panic
+        sess.current_frame = u32::MAX - 1;
+        sess.frame_tick().await;
+        assert_eq!(sess.current_frame, u32::MAX);
+
+        // 5. 10,000-iteration deterministic UDP datagram fuzz sweep
+        let mut rng: u64 = 0x5EED_CAFE_BABE_1234;
+        let mut buf = [0u8; 256];
+        for iter in 0..10_000u64 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let len = ((rng >> 32) as usize % buf.len()).max(1);
+            // Half the time inject valid magic/session header to penetrate deep into Packet handlers
+            for b in &mut buf[..len] {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                *b = (rng >> 56) as u8;
+            }
+            if iter % 2 == 0 && len >= HEADER_LEN {
+                buf[0] = MAGIC[0];
+                buf[1] = MAGIC[1];
+                buf[2] = PROTOCOL_VERSION;
+                buf[4..12].copy_from_slice(&sess.cfg.session_id.to_le_bytes());
+            }
+            sess.on_datagram(len, &buf, peer).await;
+        }
     }
 }
 

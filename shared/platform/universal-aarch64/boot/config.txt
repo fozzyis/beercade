@@ -18,3 +18,8 @@ kernel=kernel8.img
 dtoverlay=vc4-kms-v3d-pi5
 
 [all]
+# Dual-slot A/B boot prefix: slot kernels (kernel8.img), initramfs.img, DTBs,
+# overlays/, and cmdline.txt live under /slot-a/ and /slot-b/ on BOOT.
+# OTA writes os_prefix=slot-<target>/ to tryboot.txt for one-shot validation;
+# the boot health gate promotes it to config.txt once the new slot is healthy.
+os_prefix=slot-a/

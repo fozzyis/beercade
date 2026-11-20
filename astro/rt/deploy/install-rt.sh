@@ -16,7 +16,7 @@ install -m 0644 "$SCRIPT_DIR/udev/93-beercade-audio.rules" \
    /etc/udev/rules.d/93-beercade-audio.rules
 install -m 0644 "$SCRIPT_DIR/security/limits.d/50-beercade-rt.conf" \
    /etc/security/limits.d/50-beercade-rt.conf
-install -m 0644 "$SCRIPT_DIR/retroarch_rk3588.cfg" \
+install -m 0644 "$SCRIPT_DIR/../../rootfs/root/.config/retroarch/retroarch.cfg" \
    /etc/beercade/retroarch_rk3588.cfg
 
 groupadd -f audio >/dev/null 2>&1 || true

@@ -95,8 +95,22 @@ impl DaemonSharedState {
         // 2. Atomically rename .tmp -> path
         std::fs::rename(&tmp, path)?;
 
-        // 3. Update backup file: copy intact primary to .bak
-        let _ = std::fs::copy(path, &bak);
+        // 3. Atomically write backup file: write .bak.tmp -> sync_all -> rename -> .bak
+        let bak_tmp = Self::tmp_path(&bak);
+        if let Err(e) = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&bak_tmp)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&bak_tmp, &bak)
+        })() {
+            tracing::warn!(bak = %bak.display(), "Failed to atomically persist credit backup: {e}");
+        }
 
         Ok(())
     }
@@ -218,52 +232,65 @@ impl DaemonSharedState {
     }
 }
 
-#[cfg_attr(target_os = "linux", allow(dead_code, unused_variables, unused_mut))] // Phase 3 wires astro_input_get_stats
+#[cfg(any(target_os = "linux", test))]
+const ASTRO_RT_STATS_MAGIC: u64 = 0x4153_5452_4F52_5431;
+#[cfg(any(target_os = "linux", test))]
+const ASTRO_RT_STATS_VERSION: u32 = 1;
+#[cfg(any(target_os = "linux", test))]
+const ASTRO_RT_STATS_SIZE: usize = 184;
+
+#[cfg(any(target_os = "linux", test))]
+fn read_astro_rt_stats(path: &Path) -> Option<InputJitterStats> {
+    let le_u32 = |buf: &[u8], off: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(buf.get(off..off + 4)?.try_into().ok()?))
+    };
+    let le_u64 = |buf: &[u8], off: usize| -> Option<u64> {
+        Some(u64::from_le_bytes(buf.get(off..off + 8)?.try_into().ok()?))
+    };
+
+    for _ in 0..3 {
+        let buf = std::fs::read(path).ok()?;
+        if buf.len() < ASTRO_RT_STATS_SIZE {
+            return None;
+        }
+        if le_u64(&buf, 0)? != ASTRO_RT_STATS_MAGIC || le_u32(&buf, 8)? != ASTRO_RT_STATS_VERSION {
+            return None;
+        }
+        let seq1 = le_u32(&buf, 12)?;
+        if seq1 % 2 != 0 {
+            continue; // writer active in seqlock
+        }
+        let stats = InputJitterStats {
+            poll_rate_hz: le_u32(&buf, 16)? as f32,
+            p50_us: le_u32(&buf, 20)? as f32,
+            p95_us: le_u32(&buf, 24)? as f32,
+            p99_us: le_u32(&buf, 28)? as f32,
+            max_us: le_u32(&buf, 32)? as f32,
+            dropped_events: le_u32(&buf, 40)?,
+        };
+        // Re-read seq from file to confirm no concurrent writer mutated mid-copy.
+        let buf2 = std::fs::read(path).ok()?;
+        if buf2.len() >= 16 && le_u32(&buf2, 12) == Some(seq1) {
+            return Some(stats);
+        }
+    }
+    None
+}
+
 fn sample_input_jitter() -> InputJitterStats {
-    #[allow(unused_mut)]
-    let mut stats = InputJitterStats {
+    #[cfg(target_os = "linux")]
+    if let Some(stats) = read_astro_rt_stats(Path::new("/dev/shm/astro_rt_stats")) {
+        return stats;
+    }
+
+    InputJitterStats {
         poll_rate_hz: 0.0,
         p50_us: 0.0,
         p95_us: 0.0,
         p99_us: 0.0,
         max_us: 0.0,
         dropped_events: 0,
-    };
-
-    #[cfg(target_os = "linux")]
-    {
-        #[repr(C)]
-        struct CInputStats {
-            events_total: u32,
-            events_dropped: u32,
-            hotplug_adds: u32,
-            hotplug_removes: u32,
-            disconnect_errors: u32,
-            devices_active: u32,
-            last_wake_latency_us: u32,
-        }
-
-        extern "C" {
-            fn astro_input_get_stats(out: *mut CInputStats);
-        }
-
-        let mut c_stats = CInputStats {
-            events_total: 0,
-            events_dropped: 0,
-            hotplug_adds: 0,
-            hotplug_removes: 0,
-            disconnect_errors: 0,
-            devices_active: 0,
-            last_wake_latency_us: 0,
-        };
-
-        // SAFETY: astro_input_get_stats only writes into the provided memory if dynamically linked,
-        // otherwise this block is guarded by the presence of the hook at runtime.
-        // We detect via /proc/self/maps or fallback cleanly.
     }
-
-    // Default or fallback read: if astro_rt is active, poll rate is 1000Hz nominal
-    stats
 }
 
 fn sample_telemetry(state: &DaemonSharedState) -> NodeTelemetry {
@@ -1049,12 +1076,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let configured_boss_url = std::env::var("BOSS_ENDPOINT").unwrap_or_default();
     let initial_boss_url = if configured_boss_url.is_empty() {
-        "http://boss:8989".to_string()
+        "http://boss:8080".to_string()
     } else {
         configured_boss_url.clone()
     };
 
-    let boss_token = std::env::var("BOSS_RPC_TOKEN").unwrap_or_default();
+    let boss_token = std::env::var("BOSS_NODE_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| {
+            std::env::var("BOSS_RPC_TOKEN")
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        });
     let node_id = std::env::var("ASTRO_NODE_ID").unwrap_or_else(|_| "ASTRO-01".to_string());
 
     let credits_dir = std::env::var("ASTRO_DATA_DIR")
@@ -1114,7 +1150,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let telemetry_state = daemon_state.clone();
         let telemetry_client = client.clone();
-        let token_for_ws = boss_token.clone();
         let reconnect_notify_ws = reconnect_notify.clone();
 
         tokio::spawn(async move {
@@ -1126,20 +1161,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !configured_boss_url.is_empty() {
                 candidates.push(configured_boss_url.clone());
             }
-            candidates.push("http://boss:8989".to_string());
-            candidates.push("http://boss.local:8989".to_string());
-            candidates.push("http://boss.lan:8989".to_string());
-            candidates.push("http://192.168.100.10:8989".to_string());
-            candidates.push("http://127.0.0.1:8989".to_string());
-            candidates.push("http://192.168.100.10:8080".to_string());
+            candidates.push("http://boss:8080".to_string());
             candidates.push("http://boss.local:8080".to_string());
+            candidates.push("http://boss.lan:8080".to_string());
+            candidates.push("http://192.168.100.10:8080".to_string());
+            candidates.push("http://127.0.0.1:8080".to_string());
 
             let mut candidate_idx = 0;
 
             loop {
-                let boss_url = {
+                let (boss_url, token_for_ws) = {
                     let state = telemetry_state.read().await;
-                    state.boss_url.clone()
+                    (state.boss_url.clone(), state.boss_token.clone())
                 };
 
                 let ws_url = format_ws_telemetry_url(&boss_url);
@@ -1175,7 +1208,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 sample_telemetry(&state)
                             };
 
-                            let msg = serde_json::to_string(&telemetry).unwrap();
+                            let msg = match serde_json::to_string(&telemetry) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    tracing::error!("Failed to serialize telemetry: {e}");
+                                    sleep(Duration::from_millis(1000)).await;
+                                    continue;
+                                }
+                            };
                             if let Err(e) = ws_stream.send(Message::Text(msg)).await {
                                 println!("[!] WebSocket telemetry send failed: {}", e);
                                 break;
@@ -1261,47 +1301,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Rollback netplay session (P2P UDP to the peer O.R.I.O.N. cabinet).
     // -------------------------------------------------------------------
     if let Ok(peer) = std::env::var("ASTRO_NETPLAY_PEER") {
-        let cfg = netplay::NetplayConfig {
-            session_id: std::env::var("ASTRO_NETPLAY_SESSION")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1),
-            bind_port: std::env::var("ASTRO_NETPLAY_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(9750),
-            peer_addr: peer.parse().unwrap_or_else(|_| {
-                panic!("ASTRO_NETPLAY_PEER must be a valid socket address, got {peer}")
-            }),
-            local_player: std::env::var("ASTRO_NETPLAY_PLAYER")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(0),
-            is_host: std::env::var("ASTRO_NETPLAY_HOST").map(|v| v == "1").unwrap_or(false),
-            node_id: std::env::var("ASTRO_NODE_ID").unwrap_or_else(|_| "ORION-01".to_string()),
-            ..Default::default()
-        };
-        let boss = Some(daemon_state.read().await.boss_url.clone());
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        tokio::spawn(async move {
-            let outcome = netplay::run_station(
-                cfg,
-                netplay::SyntheticCore::default(),
-                Box::new(|_frame| 0),
-                shutdown_rx,
-                boss,
-            )
-            .await;
-            match outcome {
-                Ok(o) => println!("[i] netplay session ended: {}", o.end_reason),
-                Err(e) => println!("[!] netplay session failed: {e}"),
+        match peer.trim().parse::<std::net::SocketAddr>() {
+            Ok(peer_addr) => {
+                let cfg = netplay::NetplayConfig {
+                    session_id: std::env::var("ASTRO_NETPLAY_SESSION")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1),
+                    bind_port: std::env::var("ASTRO_NETPLAY_PORT")
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(9750),
+                    peer_addr,
+                    local_player: std::env::var("ASTRO_NETPLAY_PLAYER")
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(0),
+                    is_host: std::env::var("ASTRO_NETPLAY_HOST").map(|v| v == "1").unwrap_or(false),
+                    node_id: std::env::var("ASTRO_NODE_ID").unwrap_or_else(|_| "ORION-01".to_string()),
+                    ..Default::default()
+                };
+                let boss = Some(daemon_state.read().await.boss_url.clone());
+                let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+                tokio::spawn(async move {
+                    let outcome = netplay::run_station(
+                        cfg,
+                        netplay::SyntheticCore::default(),
+                        Box::new(|_frame| 0),
+                        shutdown_rx,
+                        boss,
+                    )
+                    .await;
+                    match outcome {
+                        Ok(o) => println!("[i] netplay session ended: {}", o.end_reason),
+                        Err(e) => println!("[!] netplay session failed: {e}"),
+                    }
+                });
+                println!("[✓] Rollback netplay armed against peer {peer}");
+                tokio::spawn(async move {
+                    let _ = tokio::signal::ctrl_c().await;
+                    let _ = shutdown_tx.send(true);
+                });
             }
-        });
-        println!("[✓] Rollback netplay armed against peer {peer}");
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = shutdown_tx.send(true);
-        });
+            Err(e) => {
+                tracing::error!(
+                    peer = %peer,
+                    "Invalid ASTRO_NETPLAY_PEER socket address ({e}); rollback netplay disabled"
+                );
+            }
+        }
     }
 
     // -------------------------------------------------------------------
@@ -1312,14 +1360,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .timeout(Duration::from_millis(3000))
             .build()?;
         let cmd_state = daemon_state.clone();
-        let boss_token_cmd = boss_token.clone();
 
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;
-                let (boss_url, node_id) = {
+                let (boss_url, node_id, boss_token_cmd) = {
                     let st = cmd_state.read().await;
-                    (st.boss_url.clone(), st.node_id.clone())
+                    (st.boss_url.clone(), st.node_id.clone(), st.boss_token.clone())
                 };
 
                 let url = format!("{}/api/v1/cabinet/{}/commands", boss_url, node_id);
@@ -2080,5 +2127,40 @@ mod tests {
         // Must maintain dynamic DHCP + link-local fallback
         assert!(content.contains("DHCP=yes"), "Missing DHCP=yes in 10-wired.network");
         assert!(content.contains("LinkLocalAddressing=fallback"), "Missing LinkLocalAddressing=fallback");
+    }
+
+    #[test]
+    fn test_read_astro_rt_shm_stats_abi() {
+        let dir = std::env::temp_dir().join(format!("beercade-shm-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let shm_path = dir.join("astro_rt_stats");
+
+        let mut buf = vec![0u8; ASTRO_RT_STATS_SIZE];
+        buf[0..8].copy_from_slice(&ASTRO_RT_STATS_MAGIC.to_le_bytes());
+        buf[8..12].copy_from_slice(&ASTRO_RT_STATS_VERSION.to_le_bytes());
+        buf[12..16].copy_from_slice(&4u32.to_le_bytes()); // even seq -> stable
+        buf[16..20].copy_from_slice(&1000u32.to_le_bytes());
+        buf[20..24].copy_from_slice(&42u32.to_le_bytes());
+        buf[24..28].copy_from_slice(&120u32.to_le_bytes());
+        buf[28..32].copy_from_slice(&310u32.to_le_bytes());
+        buf[32..36].copy_from_slice(&490u32.to_le_bytes());
+        buf[36..40].copy_from_slice(&5000u32.to_le_bytes());
+        buf[40..44].copy_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&shm_path, &buf).unwrap();
+
+        let parsed = read_astro_rt_stats(&shm_path).expect("valid shm snapshot");
+        assert_eq!(parsed.poll_rate_hz, 1000.0);
+        assert_eq!(parsed.p50_us, 42.0);
+        assert_eq!(parsed.p95_us, 120.0);
+        assert_eq!(parsed.p99_us, 310.0);
+        assert_eq!(parsed.max_us, 490.0);
+        assert_eq!(parsed.dropped_events, 2);
+
+        // Odd seqlock must reject as unstable
+        buf[12..16].copy_from_slice(&5u32.to_le_bytes());
+        std::fs::write(&shm_path, &buf).unwrap();
+        assert!(read_astro_rt_stats(&shm_path).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

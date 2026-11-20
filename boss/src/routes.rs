@@ -155,39 +155,45 @@ pub async fn get_telemetry_snapshot(
 // Dual-Mode Operator Authentication (LAN Bearer Token + Physical Kiosk PIN)
 // ---------------------------------------------------------------------------
 
+fn is_trusted_proxy(ip: std::net::IpAddr, trusted_proxies: &[std::net::IpAddr]) -> bool {
+    ip.is_loopback() || trusted_proxies.contains(&ip)
+}
+
 fn extract_client_ip(
     headers: &HeaderMap,
     connect_info: Option<&ConnectInfo<SocketAddr>>,
+    trusted_proxies: &[std::net::IpAddr],
 ) -> String {
-    if let Some(cf_ip) = headers
-        .get("CF-Connecting-IP")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        return cf_ip.to_string();
-    }
+    let peer_ip = connect_info.map(|ci| ci.0.ip());
+    if peer_ip.is_some_and(|ip| is_trusted_proxy(ip, trusted_proxies)) {
+        if let Some(cf_ip) = headers
+            .get("CF-Connecting-IP")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return cf_ip.to_string();
+        }
 
-    if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
-        if let Some(first_ip) = xff.split(',').next().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            return first_ip.to_string();
+        if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
+            if let Some(first_ip) = xff.split(',').next().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                return first_ip.to_string();
+            }
+        }
+
+        if let Some(real_ip) = headers
+            .get("X-Real-IP")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return real_ip.to_string();
         }
     }
 
-    if let Some(real_ip) = headers
-        .get("X-Real-IP")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        return real_ip.to_string();
-    }
-
-    if let Some(ci) = connect_info {
-        return ci.0.ip().to_string();
-    }
-
-    "127.0.0.1".to_string()
+    peer_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "untrusted-no-peer".to_string())
 }
 
 /// POST /api/v1/auth/pin — exchange the 6-digit physical kiosk operator PIN
@@ -201,7 +207,19 @@ pub async fn verify_operator_pin(
     connect_info: Option<ConnectInfo<SocketAddr>>,
     Json(req): Json<PinUnlockRequest>,
 ) -> Response {
-    let client_ip = extract_client_ip(&headers, connect_info.as_ref());
+    if state.config.operator_pin.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "error": "pin_not_provisioned",
+                "detail": "Operator PIN login disabled until BOSS_OPERATOR_PIN is provisioned.",
+            })),
+        )
+            .into_response();
+    }
+
+    let client_ip = extract_client_ip(&headers, connect_info.as_ref(), &state.config.trusted_proxies);
     let mut tracker = state.pin_tracker.lock().await;
 
     if let Some(retry_after_secs) = tracker.check_lockout(&client_ip) {
@@ -1259,12 +1277,20 @@ mod tests {
             rpc_token: rpc_token.clone(),
             node_token: node_token.clone(),
             operator_pin: "898900".to_string(),
+            discovery_key: None,
+            trusted_proxies: Vec::new(),
             edge_ingest_url: None,
             edge_ingest_token: String::new(),
         };
         let state = Arc::new(AppState::new(config));
         let router = build_router(state.clone());
         (router, state, rpc_token, node_token)
+    }
+
+    fn with_connect_ip(mut req: Request<Body>, octets: [u8; 4]) -> Request<Body> {
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((octets, 45678))));
+        req
     }
 
     async fn read_json_body(res: axum::response::Response) -> Value {
@@ -1282,13 +1308,16 @@ mod tests {
     async fn test_f5_pin_valid_returns_200_and_minted_token() {
         let (app, state, _, _) = test_app();
 
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Forwarded-For", "192.168.1.10")
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Forwarded-For", "192.168.1.10")
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
 
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1311,13 +1340,16 @@ mod tests {
         let client_ip = "192.168.1.20";
 
         for (attempt, expected_remaining) in [(1, 4), (2, 3), (3, 2), (4, 1)] {
-            let req = Request::builder()
-                .method("POST")
-                .uri("/api/v1/auth/pin")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("X-Forwarded-For", client_ip)
-                .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
-                .unwrap();
+            let req = with_connect_ip(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/pin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-Forwarded-For", client_ip)
+                    .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
+                    .unwrap(),
+                [127, 0, 0, 1],
+            );
 
             let res = app.clone().oneshot(req).await.unwrap();
             assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "attempt {} failed", attempt);
@@ -1335,25 +1367,31 @@ mod tests {
         let client_ip = "192.168.1.30";
 
         for _ in 0..4 {
-            let req = Request::builder()
-                .method("POST")
-                .uri("/api/v1/auth/pin")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("X-Forwarded-For", client_ip)
-                .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
-                .unwrap();
+            let req = with_connect_ip(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/pin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-Forwarded-For", client_ip)
+                    .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
+                    .unwrap(),
+                [127, 0, 0, 1],
+            );
             let res = app.clone().oneshot(req).await.unwrap();
             assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         }
 
         // 5th attempt triggers lockout
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Forwarded-For", client_ip)
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Forwarded-For", client_ip)
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
 
@@ -1375,24 +1413,30 @@ mod tests {
 
         // Exhaust 5 attempts
         for _ in 0..5 {
-            let req = Request::builder()
-                .method("POST")
-                .uri("/api/v1/auth/pin")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("X-Forwarded-For", client_ip)
-                .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
-                .unwrap();
+            let req = with_connect_ip(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/pin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-Forwarded-For", client_ip)
+                    .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
+                    .unwrap(),
+                [127, 0, 0, 1],
+            );
             let _ = app.clone().oneshot(req).await.unwrap();
         }
 
         // 6th attempt with CORRECT PIN is blocked because client is locked out
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Forwarded-For", client_ip)
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Forwarded-For", client_ip)
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
 
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -1413,13 +1457,16 @@ mod tests {
 
         // 3 bad attempts
         for expected in [4, 3, 2] {
-            let req = Request::builder()
-                .method("POST")
-                .uri("/api/v1/auth/pin")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("X-Forwarded-For", client_ip)
-                .body(Body::from(serde_json::to_vec(&json!({ "pin": "111111" })).unwrap()))
-                .unwrap();
+            let req = with_connect_ip(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/pin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-Forwarded-For", client_ip)
+                    .body(Body::from(serde_json::to_vec(&json!({ "pin": "111111" })).unwrap()))
+                    .unwrap(),
+                [127, 0, 0, 1],
+            );
             let res = app.clone().oneshot(req).await.unwrap();
             assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
             let body = read_json_body(res).await;
@@ -1427,24 +1474,30 @@ mod tests {
         }
 
         // Successful PIN authentication
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Forwarded-For", client_ip)
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Forwarded-For", client_ip)
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
         // Subsequent bad attempt starts fresh with 4 remaining attempts
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Forwarded-For", client_ip)
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "999999" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Forwarded-For", client_ip)
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "999999" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         let body = read_json_body(res).await;
@@ -1459,35 +1512,44 @@ mod tests {
 
         // Attacker exhausts attempts and gets locked out
         for _ in 0..5 {
-            let req = Request::builder()
-                .method("POST")
-                .uri("/api/v1/auth/pin")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header("X-Forwarded-For", attacker_ip)
-                .body(Body::from(serde_json::to_vec(&json!({ "pin": "badpin" })).unwrap()))
-                .unwrap();
+            let req = with_connect_ip(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/pin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-Forwarded-For", attacker_ip)
+                    .body(Body::from(serde_json::to_vec(&json!({ "pin": "badpin" })).unwrap()))
+                    .unwrap(),
+                [127, 0, 0, 1],
+            );
             let _ = app.clone().oneshot(req).await.unwrap();
         }
 
         // Attacker is locked out
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Forwarded-For", attacker_ip)
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Forwarded-For", attacker_ip)
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
 
         // Legitimate client from different IP can log in immediately
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Forwarded-For", legitimate_ip)
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Forwarded-For", legitimate_ip)
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
@@ -1496,39 +1558,103 @@ mod tests {
     async fn test_f5_pin_ip_header_precedence() {
         let (app, _, _, _) = test_app();
 
-        // 1. CF-Connecting-IP takes precedence over X-Forwarded-For
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("CF-Connecting-IP", "172.20.0.1")
-            .header("X-Forwarded-For", "172.20.0.2")
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "bad" })).unwrap()))
-            .unwrap();
+        // 1. CF-Connecting-IP takes precedence over X-Forwarded-For (when peer is trusted loopback)
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("CF-Connecting-IP", "172.20.0.1")
+                .header("X-Forwarded-For", "172.20.0.2")
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "bad" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
         // 2. X-Forwarded-For comma separated list takes the first IP
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Forwarded-For", "172.20.0.3, 10.0.0.1")
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "bad" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Forwarded-For", "172.20.0.3, 10.0.0.1")
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "bad" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
         // 3. X-Real-IP is used if CF-Connecting-IP and X-Forwarded-For are absent
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/pin")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("X-Real-IP", "172.20.0.4")
-            .body(Body::from(serde_json::to_vec(&json!({ "pin": "bad" })).unwrap()))
-            .unwrap();
+        let req = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Real-IP", "172.20.0.4")
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "bad" })).unwrap()))
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_f5_pin_xff_spoof_from_untrusted_peer_still_locks_out() {
+        let (app, _, _, _) = test_app();
+        let lan_attacker = [192, 168, 1, 50];
+
+        // Attacker rotates XFF + CF-Connecting-IP every request, but peer SocketAddr is untrusted
+        for i in 1..=4 {
+            let spoof = format!("203.0.113.{i}");
+            let req = with_connect_ip(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/pin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("CF-Connecting-IP", &spoof)
+                    .header("X-Forwarded-For", &spoof)
+                    .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
+                    .unwrap(),
+                lan_attacker,
+            );
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // 5th bad attempt locks out the true peer IP despite new spoofed headers
+        let req5 = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("CF-Connecting-IP", "203.0.113.5")
+                .header("X-Forwarded-For", "203.0.113.5")
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "000000" })).unwrap()))
+                .unwrap(),
+            lan_attacker,
+        );
+        let res5 = app.clone().oneshot(req5).await.unwrap();
+        assert_eq!(res5.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(res5.headers().get(header::RETRY_AFTER).unwrap().to_str().unwrap(), "60");
+
+        // 6th attempt even with valid PIN and yet another spoofed header remains locked out
+        let req6 = with_connect_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/pin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("CF-Connecting-IP", "203.0.113.99")
+                .header("X-Forwarded-For", "203.0.113.99")
+                .body(Body::from(serde_json::to_vec(&json!({ "pin": "898900" })).unwrap()))
+                .unwrap(),
+            lan_attacker,
+        );
+        let res6 = app.clone().oneshot(req6).await.unwrap();
+        assert_eq!(res6.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     // -----------------------------------------------------------------------

@@ -144,13 +144,36 @@ install -Dm0644 "$SRC/$MKINITCPIO_CONF" "$ROOT/etc/mkinitcpio-$PAYLOAD_NAME.conf
 in_root mkinitcpio -c "/etc/mkinitcpio-$PAYLOAD_NAME.conf" -k "$KVER" -g "/root/$INITRAMFS_NAME"
 mv "$ROOT/root/$INITRAMFS_NAME" "$WORK/$INITRAMFS_NAME"
 
-# Stage the BOOT partition from the firmware package's /boot, then empty it in
-# the rootfs (nothing mounts /boot on the appliance).
+# Stage the BOOT partition from the firmware package's /boot, then populate
+# dual-slot directories /slot-a/ and /slot-b/ for RPi tryboot (os_prefix) and
+# RK3588 U-Boot (boot.scr). Empty /boot in the rootfs (mounted at runtime).
 cp -a "$ROOT/boot" "$WORK/boot-stage"
 rm -f "$WORK/boot-stage"/initramfs-*.img
 cp "$WORK/$INITRAMFS_NAME" "$WORK/boot-stage/"
 cp "$WORK/$INITRAMFS_NAME" "$WORK/boot-stage/initramfs.img"
 cp -a "$SRC/$BOOT_DIR/." "$WORK/boot-stage/"
+if [[ -f "$WORK/boot-stage/boot.cmd" ]] && command -v mkimage >/dev/null 2>&1; then
+  mkimage -C none -A arm -T script -d "$WORK/boot-stage/boot.cmd" "$WORK/boot-stage/boot.scr" >/dev/null
+elif [[ -f "$WORK/boot-stage/boot.cmd" ]] && [[ -x "$ROOT/usr/bin/mkimage" ]]; then
+  cp "$WORK/boot-stage/boot.cmd" "$ROOT/tmp/boot.cmd"
+  in_root mkimage -C none -A arm -T script -d /tmp/boot.cmd /tmp/boot.scr >/dev/null
+  mv "$ROOT/tmp/boot.scr" "$WORK/boot-stage/boot.scr"
+  rm -f "$ROOT/tmp/boot.cmd"
+fi
+for slot_name in slot-a slot-b; do
+  SLOT_DIR="$WORK/boot-stage/$slot_name"
+  mkdir -p "$SLOT_DIR"
+  for boot_item in kernel8.img Image initramfs.img "$INITRAMFS_NAME" cmdline.txt; do
+    [[ -f "$WORK/boot-stage/$boot_item" ]] && cp -a "$WORK/boot-stage/$boot_item" "$SLOT_DIR/"
+  done
+  for dtb in "$WORK/boot-stage"/*.dtb; do
+    [[ -e "$dtb" ]] && cp -a "$dtb" "$SLOT_DIR/"
+  done
+  [[ -d "$WORK/boot-stage/overlays" ]] && cp -a "$WORK/boot-stage/overlays" "$SLOT_DIR/"
+  if [[ "$slot_name" == "slot-b" && -f "$SLOT_DIR/cmdline.txt" ]]; then
+    sed -i 's/PARTLABEL=ROOT_A/PARTLABEL=ROOT_B/g' "$SLOT_DIR/cmdline.txt"
+  fi
+done
 find "$ROOT/boot" -mindepth 1 -delete
 
 if [[ -d "$SRC/astro/rootfs/lib/modules" ]]; then

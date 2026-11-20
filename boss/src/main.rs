@@ -163,10 +163,24 @@ async fn main() {
     let port = std::env::var("BOSS_PORT").unwrap_or_else(|_| "8989".to_string());
     let bind_addr = format!("{}:{}", host, port);
 
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(addr = %bind_addr, "Failed to bind B.O.S.S. HTTP listener: {e}");
+            std::process::exit(1);
+        }
+    };
     println!("===============================================================");
     println!("   B.O.S.S. Central Server Active on http://{}", bind_addr);
     println!("   Serving Kiosk UI from: {}", static_dir);
     println!("===============================================================");
-    axum::serve(listener, app).await.unwrap();
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    {
+        tracing::error!("B.O.S.S. HTTP server exited with error: {e}");
+        std::process::exit(1);
+    }
 }

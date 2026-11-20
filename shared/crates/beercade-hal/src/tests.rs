@@ -117,3 +117,200 @@ fn extlinux_rewrite_only_touches_root_argument() {
     let out = point_extlinux_at(cfg, "/dev/sda3", "/dev/sda2");
     assert_eq!(out, "label astro\n  append root=/dev/sda3 rootwait console=ttyS2\n");
 }
+
+#[test]
+fn slot_device_uses_partlabel_across_all_platforms() {
+    let platforms = [
+        Platform::X86_64,
+        Platform::Rk3588,
+        Platform::Bcm2712,
+        Platform::Bcm2711,
+        Platform::GenericArm,
+    ];
+    for p in platforms {
+        assert_eq!(p.slot_device(Slot::A), "/dev/disk/by-partlabel/ROOT_A");
+        assert_eq!(p.slot_device(Slot::B), "/dev/disk/by-partlabel/ROOT_B");
+    }
+}
+
+#[test]
+fn active_slot_matches_by_partlabel_partlabel_and_legacy_sda() {
+    for (cmdline, expected) in [
+        ("root=/dev/disk/by-partlabel/ROOT_A quiet", Slot::A),
+        ("root=/dev/disk/by-partlabel/ROOT_B quiet", Slot::B),
+        ("root=PARTLABEL=ROOT_A ro", Slot::A),
+        ("root=PARTLABEL=ROOT_B ro", Slot::B),
+        ("root=/dev/sda2 ro", Slot::A),
+        ("root=/dev/sda3 ro", Slot::B),
+    ] {
+        let root = FakeRoot::new();
+        root.file("proc/cmdline", cmdline);
+        assert_eq!(Platform::Rk3588.active_slot_at(&root.0), expected, "{cmdline}");
+        assert_eq!(Platform::Bcm2712.active_slot_at(&root.0), expected, "{cmdline}");
+        assert_eq!(Platform::X86_64.active_slot_at(&root.0), expected, "{cmdline}");
+    }
+}
+
+#[test]
+fn x86_64_commit_stages_plus_3_and_updates_loader_glob() {
+    let root = FakeRoot::new();
+    let slot_a = "title Beercade (slot a)\nlinux /beercade/slot-a/vmlinuz-linux\noptions root=PARTLABEL=ROOT_A\n";
+    let slot_b = "title Beercade (slot b)\nlinux /beercade/slot-b/vmlinuz-linux\noptions root=PARTLABEL=ROOT_B\n";
+    root.file("efi/loader/entries/beercade-slot-a.conf", slot_a)
+        .file("efi/loader/entries/beercade-slot-b.conf", slot_b)
+        .file(
+            "efi/loader/loader.conf",
+            "default beercade-slot-a*.conf\ntimeout 3\nconsole-mode keep\neditor no\n",
+        );
+
+    Platform::X86_64.commit_boot_slot_at(Slot::B, &root.0).unwrap();
+
+    let entries = root.0.join("efi/loader/entries");
+    assert!(entries.join("beercade-slot-a.conf").is_file());
+    assert!(!entries.join("beercade-slot-b.conf").exists());
+    assert_eq!(fs::read_to_string(entries.join("beercade-slot-b+3.conf")).unwrap(), slot_b);
+    assert!(!entries.join("beercade-slot-b+3.conf.tmp").exists());
+
+    let loader = fs::read_to_string(root.0.join("efi/loader/loader.conf")).unwrap();
+    assert_eq!(
+        loader,
+        "default beercade-slot-b*.conf\ntimeout 3\nconsole-mode keep\neditor no\n"
+    );
+    assert!(!root.0.join("efi/loader/loader.conf.tmp").exists());
+
+    // Re-committing Slot B when an exhausted +0-3 entry exists replaces it cleanly with +3.
+    fs::rename(
+        entries.join("beercade-slot-b+3.conf"),
+        entries.join("beercade-slot-b+0-3.conf"),
+    )
+    .unwrap();
+    Platform::X86_64.commit_boot_slot_at(Slot::B, &root.0).unwrap();
+    assert!(!entries.join("beercade-slot-b+0-3.conf").exists());
+    assert_eq!(fs::read_to_string(entries.join("beercade-slot-b+3.conf")).unwrap(), slot_b);
+}
+
+#[test]
+fn x86_64_bless_boot_promotes_counted_entry_and_clears_other_exhausted() {
+    let root = FakeRoot::new();
+    let slot_a = "title Beercade (slot a)\nlinux /beercade/slot-a/vmlinuz-linux\n";
+    let slot_b = "title Beercade (slot b)\nlinux /beercade/slot-b/vmlinuz-linux\n";
+    root.file("efi/loader/entries/beercade-slot-a.conf", slot_a)
+        .file("efi/loader/entries/beercade-slot-b+2-1.conf", slot_b)
+        .file(
+            "efi/loader/loader.conf",
+            "default beercade-slot-b*.conf\ntimeout 3\nconsole-mode keep\neditor no\n",
+        );
+
+    Platform::X86_64.bless_boot_at(Slot::B, &root.0).unwrap();
+    let entries = root.0.join("efi/loader/entries");
+    assert!(!entries.join("beercade-slot-b+2-1.conf").exists());
+    assert_eq!(fs::read_to_string(entries.join("beercade-slot-b.conf")).unwrap(), slot_b);
+
+    // Simulate a failed Slot B upgrade (+0-3) that rolled back to Slot A.
+    fs::rename(
+        entries.join("beercade-slot-b.conf"),
+        entries.join("beercade-slot-b+0-3.conf"),
+    )
+    .unwrap();
+    Platform::X86_64.bless_boot_at(Slot::A, &root.0).unwrap();
+    assert!(!entries.join("beercade-slot-b+0-3.conf").exists());
+    assert_eq!(fs::read_to_string(entries.join("beercade-slot-b.conf")).unwrap(), slot_b);
+    assert_eq!(
+        fs::read_to_string(root.0.join("efi/loader/loader.conf")).unwrap(),
+        "default beercade-slot-a*.conf\ntimeout 3\nconsole-mode keep\neditor no\n"
+    );
+}
+
+#[test]
+fn rpi_commit_writes_tryboot_and_bless_promotes_to_config() {
+    for platform in [Platform::Bcm2711, Platform::Bcm2712] {
+        let root = FakeRoot::new();
+        let initial_cfg = "\
+arm_64bit=1
+initramfs initramfs.img followkernel
+
+[pi4]
+kernel=kernel8.img
+
+[pi5]
+kernel=kernel8.img
+
+[all]
+os_prefix=slot-a/
+";
+        root.file("boot/config.txt", initial_cfg);
+
+        platform.commit_boot_slot_at(Slot::B, &root.0).unwrap();
+
+        // config.txt must stay untouched for hardware one-shot rollback on power loss.
+        assert_eq!(fs::read_to_string(root.0.join("boot/config.txt")).unwrap(), initial_cfg);
+        let tryboot = fs::read_to_string(root.0.join("boot/tryboot.txt")).unwrap();
+        assert!(tryboot.contains("os_prefix=slot-b/\n"));
+        assert!(!tryboot.contains("os_prefix=slot-a/"));
+        assert!(tryboot.contains("[pi4]\nkernel=kernel8.img\n"));
+        assert!(tryboot.contains("[pi5]\nkernel=kernel8.img\n"));
+        assert!(!root.0.join("boot/tryboot.txt.tmp").exists());
+
+        // Successful boot on Slot B promotes os_prefix=slot-b/ into config.txt and removes tryboot.txt.
+        platform.bless_boot_at(Slot::B, &root.0).unwrap();
+        assert!(!root.0.join("boot/tryboot.txt").exists());
+        let promoted = fs::read_to_string(root.0.join("boot/config.txt")).unwrap();
+        assert!(promoted.contains("os_prefix=slot-b/\n"));
+        assert!(!promoted.contains("os_prefix=slot-a/"));
+
+        // Failed tryboot rolled back to Slot B keeps config.txt on Slot B and deletes stale tryboot.txt.
+        platform.commit_boot_slot_at(Slot::A, &root.0).unwrap();
+        assert!(root.0.join("boot/tryboot.txt").is_file());
+        platform.bless_boot_at(Slot::B, &root.0).unwrap();
+        assert!(!root.0.join("boot/tryboot.txt").exists());
+        assert!(fs::read_to_string(root.0.join("boot/config.txt"))
+            .unwrap()
+            .contains("os_prefix=slot-b/\n"));
+    }
+}
+
+#[test]
+fn rpi_inserts_os_prefix_when_missing_from_config() {
+    let root = FakeRoot::new();
+    root.file("boot/config.txt", "arm_64bit=1\n[pi4]\nkernel=kernel8.img\n");
+
+    Platform::Bcm2712.commit_boot_slot_at(Slot::B, &root.0).unwrap();
+    let tryboot = fs::read_to_string(root.0.join("boot/tryboot.txt")).unwrap();
+    assert_eq!(
+        tryboot,
+        "arm_64bit=1\nos_prefix=slot-b/\n[pi4]\nkernel=kernel8.img\n"
+    );
+}
+
+#[test]
+fn rk3588_commit_updates_extlinux_partlabel_and_legacy_atomically() {
+    let root = FakeRoot::new();
+    let cfg_a = "\
+default beercade
+label beercade
+    kernel /Image
+    append earlycon=uart8250,mmio32,0xfeb50000 root=PARTLABEL=ROOT_A rootfstype=squashfs ro rootwait
+";
+    root.file("boot/extlinux/extlinux.conf", cfg_a);
+
+    Platform::Rk3588.commit_boot_slot_at(Slot::B, &root.0).unwrap();
+    let out_b = fs::read_to_string(root.0.join("boot/extlinux/extlinux.conf")).unwrap();
+    assert!(out_b.contains("root=PARTLABEL=ROOT_B"));
+    assert!(!out_b.contains("root=PARTLABEL=ROOT_A"));
+    assert!(!root.0.join("boot/extlinux/extlinux.conf.tmp").exists());
+
+    Platform::Rk3588.commit_boot_slot_at(Slot::A, &root.0).unwrap();
+    let out_a = fs::read_to_string(root.0.join("boot/extlinux/extlinux.conf")).unwrap();
+    assert_eq!(out_a, cfg_a);
+
+    // Legacy /dev/sda2 in extlinux.conf is also migrated to PARTLABEL=ROOT_B.
+    root.file(
+        "boot/extlinux/extlinux.conf",
+        "label beercade\n  append root=/dev/sda2 rootwait\n",
+    );
+    Platform::Rk3588.commit_boot_slot_at(Slot::B, &root.0).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.0.join("boot/extlinux/extlinux.conf")).unwrap(),
+        "label beercade\n  append root=PARTLABEL=ROOT_B rootwait\n"
+    );
+}

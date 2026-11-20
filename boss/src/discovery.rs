@@ -6,6 +6,7 @@
 //! 3. Automatic detection of local network interfaces and host IPs.
 //! 4. UDP broadcast beaconing across venue LAN & virtual networks.
 
+use beercade_shared::crypto::{derive_discovery_key, hmac_sha256_hex};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -15,6 +16,45 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use crate::models::{CreditCounters, InputJitterStats, NodeTelemetry, now_epoch_ms};
 use crate::state::SharedState;
+
+fn now_epoch_secs() -> i64 {
+    (now_epoch_ms() / 1_000) as i64
+}
+
+fn discovery_secret_for(state: &SharedState) -> &str {
+    state
+        .config
+        .discovery_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(state.config.node_token.as_str())
+}
+
+pub fn sign_connect_headers(
+    discovery_secret: &str,
+    ts: i64,
+    boss_url: &str,
+    node_token: &str,
+) -> Option<String> {
+    let secret = discovery_secret.trim();
+    if secret.is_empty() {
+        return None;
+    }
+    let key = derive_discovery_key(secret);
+    let msg = format!("{ts}\n{boss_url}\n{node_token}");
+    Some(hmac_sha256_hex(&key, msg.as_bytes()))
+}
+
+pub fn sign_udp_probe(discovery_secret: &str, ts: i64, boss_url: &str) -> Option<String> {
+    let secret = discovery_secret.trim();
+    if secret.is_empty() {
+        return None;
+    }
+    let key = derive_discovery_key(secret);
+    let msg = format!("BEERCADE_PROBE|{ts}|{boss_url}");
+    Some(hmac_sha256_hex(&key, msg.as_bytes()))
+}
 
 pub const ASTRO_DEFAULT_DISCOVERY_PORT: u16 = 8990;
 
@@ -194,7 +234,12 @@ pub async fn send_connect_directive(
     port: u16,
     boss_url: &str,
     node_token: &str,
+    discovery_secret: &str,
 ) -> Result<String, String> {
+    let ts = now_epoch_secs();
+    let Some(sig) = sign_connect_headers(discovery_secret, ts, boss_url, node_token) else {
+        return Err("Discovery signing secret is empty; refusing unauthenticated directive".to_string());
+    };
     let url = format!("http://{}:{}/api/v1/boss/connect", host, port);
     let body = serde_json::json!({
         "boss_url": boss_url,
@@ -203,6 +248,8 @@ pub async fn send_connect_directive(
 
     let res = client
         .post(&url)
+        .header("X-Beercade-Timestamp", ts.to_string())
+        .header("X-Beercade-Signature", sig)
         .timeout(Duration::from_millis(1500))
         .json(&body)
         .send()
@@ -231,19 +278,19 @@ pub async fn register_initial_node_telemetry(
         node_id: node.node_id.clone(),
         hardware: node.hardware.clone().unwrap_or_else(|| "Generic ARM64".to_string()),
         soc: node.soc.clone().unwrap_or_else(|| "Broadcom/Rockchip".to_string()),
-        cpu_temp_c: Some(42.0),
-        gpu_temp_c: Some(40.0),
+        cpu_temp_c: None,
+        gpu_temp_c: None,
         npu_load_pct: 0.0,
         active_core: "none".to_string(),
         active_rom: "idle".to_string(),
-        frame_time_ms: 16.66,
-        fps: 60.0,
+        frame_time_ms: 0.0,
+        fps: 0.0,
         input_jitter: InputJitterStats {
-            poll_rate_hz: 1000.0,
-            p50_us: 120.0,
-            p95_us: 250.0,
-            p99_us: 400.0,
-            max_us: 650.0,
+            poll_rate_hz: 0.0,
+            p50_us: 0.0,
+            p95_us: 0.0,
+            p99_us: 0.0,
+            max_us: 0.0,
             dropped_events: 0,
         },
         netplay: None,
@@ -307,8 +354,9 @@ pub async fn force_connect_node(
         .await
         .ok_or_else(|| format!("Could not reach ASTRO node discovery endpoint at {host}:{port}. Ensure ASTRO is running."))?;
 
-    // 2. Dispatch connect directive
-    send_connect_directive(&client, &host, port, &boss_url, &state.config.node_token).await?;
+    // 2. Dispatch signed connect directive
+    let secret = discovery_secret_for(state);
+    send_connect_directive(&client, &host, port, &boss_url, &state.config.node_token, secret).await?;
 
     node.connected = true;
 
@@ -379,12 +427,22 @@ pub async fn scan_subnets_and_arp(
 
     let total_candidates = candidate_ips.len();
 
-    // 2. Broadcast UDP Probe across LAN/broadcast
+    let discovery_secret = discovery_secret_for(state).to_string();
+
+    // 2. Broadcast signed UDP Probe across LAN/broadcast
     let udp_boss_url = boss_url.clone();
+    let udp_secret = discovery_secret.clone();
     tokio::spawn(async move {
+        let ts = now_epoch_secs();
+        let Some(sig) = sign_udp_probe(&udp_secret, ts, &udp_boss_url) else {
+            return;
+        };
         if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await {
             let _ = socket.set_broadcast(true);
-            let msg = format!("BEERCADE_PROBE:{{\"boss_url\":\"{}\"}}", udp_boss_url);
+            let msg = format!(
+                "BEERCADE_PROBE:{}",
+                serde_json::json!({ "boss_url": udp_boss_url, "ts": ts, "sig": sig })
+            );
             for bcast in &["255.255.255.255:8990", "172.28.0.255:8990", "192.168.100.255:8990"] {
                 if let Ok(addr) = bcast.parse::<SocketAddr>() {
                     let _ = socket.send_to(msg.as_bytes(), addr).await;
@@ -415,14 +473,16 @@ pub async fn scan_subnets_and_arp(
                 seen_node_ids.insert(node.node_id.clone());
 
                 // Command this node to connect to BOSS
-                if let Ok(_) = send_connect_directive(
+                if send_connect_directive(
                     &client,
                     &node.ip,
                     node.port,
                     &boss_url,
                     &state.config.node_token,
+                    &discovery_secret,
                 )
                 .await
+                .is_ok()
                 {
                     node.connected = true;
                     register_initial_node_telemetry(state, &node).await;
@@ -507,7 +567,7 @@ mod tests {
         let directive_received = Arc::new(AtomicBool::new(false));
         let flag = directive_received.clone();
 
-        // Spawn a mock ASTRO discovery server
+        // Spawn a mock ASTRO discovery server enforcing HMAC discovery signature
         let mock_app = Router::new()
             .route(
                 "/api/v1/node/info",
@@ -517,7 +577,7 @@ mod tests {
                         "status": "online",
                         "hardware": "Radxa Rock 5C",
                         "soc": "Rockchip RK3588S",
-                        "boss_url": "http://boss:8989",
+                        "boss_url": "http://boss:8080",
                         "discovery_port": 8990,
                         "mode": { "type": "Standalone" }
                     }))
@@ -525,19 +585,35 @@ mod tests {
             )
             .route(
                 "/api/v1/boss/connect",
-                post(move |Json(payload): Json<serde_json::Value>| {
-                    let flag = flag.clone();
-                    async move {
-                        if payload.get("boss_url").is_some() {
-                            flag.store(true, Ordering::SeqCst);
+                post(
+                    move |headers: axum::http::HeaderMap, Json(payload): Json<serde_json::Value>| {
+                        let flag = flag.clone();
+                        async move {
+                            let boss_url = payload.get("boss_url").and_then(|v| v.as_str()).unwrap_or("");
+                            let tok = payload.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                            let ts = headers
+                                .get("X-Beercade-Timestamp")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            let sig = headers
+                                .get("X-Beercade-Signature")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            let key = derive_discovery_key("node_secret");
+                            let msg = format!("{ts}\n{boss_url}\n{tok}");
+                            if !boss_url.is_empty()
+                                && beercade_shared::crypto::verify_hmac_sha256_hex(&key, msg.as_bytes(), sig)
+                            {
+                                flag.store(true, Ordering::SeqCst);
+                            }
+                            Json(serde_json::json!({
+                                "status": "ok",
+                                "node_id": "MOCK-ASTRO-99",
+                                "message": "Connected"
+                            }))
                         }
-                        Json(serde_json::json!({
-                            "status": "ok",
-                            "node_id": "MOCK-ASTRO-99",
-                            "message": "Connected"
-                        }))
-                    }
-                }),
+                    },
+                ),
             );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -559,20 +635,24 @@ mod tests {
             rpc_token: "secret".to_string(),
             node_token: "node_secret".to_string(),
             operator_pin: "898900".to_string(),
+            discovery_key: None,
+            trusted_proxies: Vec::new(),
             edge_ingest_url: None,
             edge_ingest_token: String::new(),
         }));
 
         let target_str = format!("127.0.0.1:{}", port);
-        let res = force_connect_node(&target_str, Some("http://127.0.0.1:8989"), &state).await;
+        let res = force_connect_node(&target_str, Some("http://127.0.0.1:8080"), &state).await;
         assert!(res.is_ok());
         let connected_node = res.unwrap();
         assert_eq!(connected_node.node_id, "MOCK-ASTRO-99");
         assert!(connected_node.connected);
         assert!(directive_received.load(Ordering::SeqCst));
 
-        // Verify the node was registered into BOSS's node map
+        // Verify the node was registered into BOSS's node map without synthetic temps
         let nodes = state.nodes.read().await;
-        assert!(nodes.contains_key("MOCK-ASTRO-99"));
+        let (telemetry, _) = nodes.get("MOCK-ASTRO-99").unwrap();
+        assert_eq!(telemetry.cpu_temp_c, None);
+        assert_eq!(telemetry.gpu_temp_c, None);
     }
 }

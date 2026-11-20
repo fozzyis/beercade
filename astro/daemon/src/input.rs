@@ -183,7 +183,12 @@ pub fn spawn_readers(tx: tokio::sync::mpsc::UnboundedSender<MenuInput>, grab: Ar
                     .file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with("event"));
-                if !is_event || !open.lock().unwrap().insert(path.clone()) {
+                if !is_event
+                    || !open
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(path.clone())
+                {
                     continue;
                 }
                 let (tx, grab, open) = (tx.clone(), grab.clone(), open.clone());
@@ -191,7 +196,7 @@ pub fn spawn_readers(tx: tokio::sync::mpsc::UnboundedSender<MenuInput>, grab: Ar
                     if let Err(e) = read_device(&path, &tx, &grab) {
                         tracing::debug!("input {} closed: {e}", path.display());
                     }
-                    open.lock().unwrap().remove(&path);
+                    open.lock().unwrap_or_else(|e| e.into_inner()).remove(&path);
                 });
             }
         }

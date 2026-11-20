@@ -1,1 +1,2 @@
 PARTLABEL=DATA /data ext4 defaults,nofail,x-systemd.growfs 0 2
+PARTLABEL=ESP /efi vfat umask=0077,nofail,x-systemd.automount 0 2

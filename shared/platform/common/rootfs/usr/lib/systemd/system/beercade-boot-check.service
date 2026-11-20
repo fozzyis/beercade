@@ -1,0 +1,14 @@
+[Unit]
+Description=B.E.E.R.C.A.D.E. post-boot health gate and A/B boot bless
+After=network-online.target astro-daemon.service boss-server.service
+Wants=network-online.target
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/beercade-boot-check.sh
+
+[Install]
+RequiredBy=boot-complete.target
+WantedBy=multi-user.target

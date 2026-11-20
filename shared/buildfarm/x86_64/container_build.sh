@@ -90,6 +90,7 @@ if [[ -n "${DEV_SSH_KEY:-}" ]]; then
     > "$ROOT/etc/ssh/sshd_config.d/10-beercade-dev.conf"
 fi
 install -d -m0755 "$ROOT/data"
+install -d -m0700 "$ROOT/efi"
 
 banner "initramfs"
 KVER=

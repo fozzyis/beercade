@@ -150,23 +150,63 @@ pub async fn stage_ota_payload(
 /// `boss_token` is forwarded as `Authorization: Bearer <token>` so that the
 /// BOSS `/api/v1/sync/<filename>` endpoint accepts the request.
 pub async fn execute_ota_update(boss_url: &str, filename: &str, boss_token: &str) -> Result<(), String> {
-    // Safely detect A/B slots from the running environment (no mmcblk hardcodes).
     let platform = Platform::detect();
+    execute_ota_update_with(
+        boss_url,
+        filename,
+        boss_token,
+        Path::new(STAGING_PATH),
+        platform,
+        |staging, inactive| async move { flash_inactive_slot_async(&staging, &inactive).await },
+        |p, target| p.commit_boot_slot(target).map_err(|e| e.to_string()),
+        true,
+    )
+    .await
+}
+
+async fn execute_ota_update_with<F, Fut, C>(
+    boss_url: &str,
+    filename: &str,
+    boss_token: &str,
+    staging_path: &Path,
+    platform: Platform,
+    flash_fn: F,
+    commit_fn: C,
+    spawn_reboot: bool,
+) -> Result<(), String>
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+    C: FnOnce(Platform, beercade_hal::Slot) -> Result<(), String>,
+{
     let target = platform.active_slot().other();
     let inactive_slot = platform.slot_device(target);
     println!("[i] OTA Update Triggered: {} -> {}", filename, inactive_slot);
 
-    let staging_path = Path::new(STAGING_PATH);
     let total_bytes = stage_ota_payload(boss_url, filename, boss_token, staging_path).await?;
     println!("[i] Staged {} bytes to {}", total_bytes, staging_path.display());
 
-    // 3) Write the verified staging image to the inactive boot slot.
-    flash_inactive_slot(STAGING_PATH, inactive_slot)?;
+    // Always clean up the staged image once flashing/commit finishes or fails.
+    let res: Result<(), String> = async {
+        let staging_str = staging_path.to_string_lossy().into_owned();
+        flash_fn(staging_str, inactive_slot.to_string()).await?;
+        commit_fn(platform, target)?;
+        Ok(())
+    }
+    .await;
 
-    // 4) Make the bootloader boot the freshly flashed slot, then reboot.
-    platform.commit_boot_slot(target).map_err(|e| e.to_string())?;
+    let _ = tokio::fs::remove_file(staging_path).await;
+    res?;
+
     println!("[i] OTA applied to {}; rebooting onto the new image...", inactive_slot);
-    let _ = std::process::Command::new("reboot").spawn();
+    if spawn_reboot {
+        let mut cmd = std::process::Command::new("reboot");
+        if matches!(platform, Platform::Bcm2711 | Platform::Bcm2712) {
+            // RPi hardware one-shot A/B tryboot: reverts to config.txt on power loss/hang.
+            cmd.arg("0 tryboot");
+        }
+        let _ = cmd.spawn();
+    }
 
     Ok(())
 }
@@ -222,6 +262,14 @@ fn check_free_space(staging_dir: &Path, required: u64) -> Result<(), String> {
 /// corrupt the active runtime — and we only flip the boot target after `dd`
 /// reports success, making the swap effectively atomic from the bootloader's
 /// point of view.
+async fn flash_inactive_slot_async(staging_path: &str, inactive_slot: &str) -> Result<(), String> {
+    let staging = staging_path.to_string();
+    let slot = inactive_slot.to_string();
+    tokio::task::spawn_blocking(move || flash_inactive_slot(&staging, &slot))
+        .await
+        .map_err(|e| format!("dd task panicked/cancelled: {e}"))?
+}
+
 fn flash_inactive_slot(staging_path: &str, inactive_slot: &str) -> Result<(), String> {
     let output = std::process::Command::new("dd")
         .arg(format!("if={}", staging_path))
@@ -235,9 +283,11 @@ fn flash_inactive_slot(staging_path: &str, inactive_slot: &str) -> Result<(), St
         .map_err(|e| format!("failed to run dd: {e}"))?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "dd failed ({}); aborting OTA — active runtime untouched",
-            output.status
+            "dd failed ({}): {}; aborting OTA — active runtime untouched",
+            output.status,
+            stderr.trim()
         ));
     }
     Ok(())
@@ -553,5 +603,44 @@ pub mod tests {
         let err = res.unwrap_err();
         assert!(err.contains("Invalid UTF-8 in X-OTA-SHA256 header"), "Unexpected error: {}", err);
         assert!(!staging_file.exists());
+    }
+
+    #[tokio::test]
+    async fn test_execute_ota_cleans_staging_on_post_staging_failure() {
+        let payload = b"VALID_OTA_SQUASHFS_IMAGE".to_vec();
+        let expected_sha = beercade_shared::crypto::compute_sha256(&payload);
+        let (server_url, _) = spawn_mock_ota_server(200, Some(&expected_sha), payload).await;
+
+        let root = FakeRoot::new("ota-test-post-stage-cleanup");
+        let staging_file = root.path().join("staging.sqsh");
+
+        let res = execute_ota_update_with(
+            &server_url,
+            "update.sqsh",
+            "token",
+            &staging_file,
+            Platform::X86_64,
+            |_s, _slot| async { Err("simulated dd write error".to_string()) },
+            |_p, _slot| Ok(()),
+            false,
+        )
+        .await;
+        assert!(res.is_err());
+        assert!(!staging_file.exists(), "staging file must be unlinked when flash fails");
+
+        let (server_url2, _) = spawn_mock_ota_server(200, Some(&expected_sha), b"VALID_OTA_SQUASHFS_IMAGE".to_vec()).await;
+        let res2 = execute_ota_update_with(
+            &server_url2,
+            "update.sqsh",
+            "token",
+            &staging_file,
+            Platform::X86_64,
+            |_s, _slot| async { Ok(()) },
+            |_p, _slot| Err("simulated bootctl error".to_string()),
+            false,
+        )
+        .await;
+        assert!(res2.is_err());
+        assert!(!staging_file.exists(), "staging file must be unlinked when commit_boot_slot fails");
     }
 }

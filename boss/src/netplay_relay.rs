@@ -374,10 +374,11 @@ async fn ingest_report(
         .endpoints
         .iter()
         .position(|e| matches!(e, Some(ep) if ep.node_id == body.node_id))
+        .or_else(|| session.endpoints.iter().position(|e| e.is_none()))
         .unwrap_or(0);
     let ep = session.endpoints[slot].get_or_insert_with(|| RelayEndpoint {
         node_id: body.node_id.clone(),
-        addr: "unknown".parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),
+        addr: SocketAddr::from(([0, 0, 0, 0], 0)),
         state: "Active".to_string(),
         loss_pct: 0.0,
         last_seen_ms: now,

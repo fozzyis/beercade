@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -54,6 +55,34 @@ impl Slot {
         match self {
             Slot::A => Slot::B,
             Slot::B => Slot::A,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Slot::A => "a",
+            Slot::B => "b",
+        }
+    }
+
+    fn partlabel(self) -> &'static str {
+        match self {
+            Slot::A => "PARTLABEL=ROOT_A",
+            Slot::B => "PARTLABEL=ROOT_B",
+        }
+    }
+
+    fn legacy_device(self) -> &'static str {
+        match self {
+            Slot::A => "/dev/sda2",
+            Slot::B => "/dev/sda3",
+        }
+    }
+
+    fn systemd_entry_prefix(self) -> &'static str {
+        match self {
+            Slot::A => "beercade-slot-a",
+            Slot::B => "beercade-slot-b",
         }
     }
 }
@@ -136,14 +165,14 @@ impl Platform {
     }
 
     /// Block device for an A/B rootfs slot.
+    ///
+    /// All platforms address slots by GPT partition label so the underlying
+    /// storage can be SD, eMMC, SATA, NVMe, or virtio without board-specific
+    /// device paths.
     pub fn slot_device(self, slot: Slot) -> &'static str {
-        match (self, slot) {
-            // x86 images address slots by GPT partition label so the disk can be
-            // SATA, NVMe or virtio without changing anything.
-            (Platform::X86_64, Slot::A) => "/dev/disk/by-partlabel/ROOT_A",
-            (Platform::X86_64, Slot::B) => "/dev/disk/by-partlabel/ROOT_B",
-            (_, Slot::A) => "/dev/sda2",
-            (_, Slot::B) => "/dev/sda3",
+        match slot {
+            Slot::A => "/dev/disk/by-partlabel/ROOT_A",
+            Slot::B => "/dev/disk/by-partlabel/ROOT_B",
         }
     }
 
@@ -173,49 +202,366 @@ impl Platform {
     }
 
     fn slot_for_root(self, dev: &str) -> Option<Slot> {
-        [(Slot::A, "PARTLABEL=ROOT_A"), (Slot::B, "PARTLABEL=ROOT_B")]
-            .into_iter()
-            .find(|&(slot, label)| dev == self.slot_device(slot) || dev == label)
-            .map(|(slot, _)| slot)
+        [Slot::A, Slot::B].into_iter().find(|&slot| {
+            dev == self.slot_device(slot)
+                || dev == slot.partlabel()
+                || dev == slot.legacy_device()
+        })
     }
 
-    /// Make the next boot load `slot`.
+    /// Stage the next boot to load `slot` (with rollback protection on the live system).
     pub fn commit_boot_slot(self, slot: Slot) -> Result<(), HalError> {
         match self {
             Platform::X86_64 => {
-                let entry = match slot {
-                    Slot::A => "beercade-slot-a.conf",
-                    Slot::B => "beercade-slot-b.conf",
-                };
-                run(Command::new("bootctl").args(["set-default", entry]))
+                self.commit_boot_slot_at(slot, Path::new("/"))?;
+                // Clear EFI LoaderEntryDefault so loader.conf's glob controls
+                // fallback after 3 failed boots; ignore when EFI vars are absent.
+                let _ = Command::new("bootctl").args(["set-default", ""]).output();
+                Ok(())
             }
-            _ => self.commit_uboot(slot, Path::new("/boot/extlinux/extlinux.conf")),
+            Platform::Rk3588 => {
+                let name = slot.id();
+                if run(Command::new("fw_setenv").args(["boot_slot", name])).is_ok()
+                    && run(Command::new("fw_setenv").args(["upgrade_available", "1"])).is_ok()
+                    && run(Command::new("fw_setenv").args(["bootcount", "0"])).is_ok()
+                {
+                    return Ok(());
+                }
+                self.commit_boot_slot_at(slot, Path::new("/"))
+            }
+            Platform::Bcm2711 | Platform::Bcm2712 | Platform::GenericArm => {
+                self.commit_boot_slot_at(slot, Path::new("/"))
+            }
         }
     }
 
-    /// U-Boot: prefer the env var the boot script consults, else rewrite
-    /// extlinux.conf atomically (write temp, then rename).
-    fn commit_uboot(self, slot: Slot, extlinux: &Path) -> Result<(), HalError> {
-        let name = match slot {
-            Slot::A => "a",
-            Slot::B => "b",
-        };
-        if run(Command::new("fw_setenv").args(["raid_slot_being_flashed", name])).is_ok() {
-            return Ok(());
+    /// Stage the next boot to load `slot` under `root` (filesystem-only, testable).
+    pub fn commit_boot_slot_at(self, slot: Slot, root: &Path) -> Result<(), HalError> {
+        match self {
+            Platform::X86_64 => commit_systemd_boot_at(slot, root),
+            Platform::Bcm2711 | Platform::Bcm2712 => commit_rpi_tryboot_at(slot, root),
+            Platform::Rk3588 | Platform::GenericArm => update_extlinux_slot(self, slot, root),
         }
-        let config = fs::read_to_string(extlinux).map_err(|e| {
-            HalError::Bootloader(format!("fw_setenv unavailable and {} unreadable: {e}", extlinux.display()))
-        })?;
-        let rewritten = point_extlinux_at(&config, self.slot_device(slot), self.slot_device(slot.other()));
-        let tmp = extlinux.with_extension("conf.tmp");
-        fs::write(&tmp, rewritten).map_err(|e| HalError::Io(tmp.clone(), e))?;
-        fs::rename(&tmp, extlinux).map_err(|e| HalError::Io(extlinux.to_path_buf(), e))
+    }
+
+    /// Mark the currently booted slot healthy so the bootloader will not roll back.
+    pub fn bless_boot(self) -> Result<(), HalError> {
+        match self {
+            Platform::X86_64 => {
+                let cmd_res = run(Command::new("systemd-bless-boot").arg("good"));
+                let file_res = self.bless_boot_at(self.active_slot(), Path::new("/"));
+                match (cmd_res, file_res) {
+                    (_, Ok(())) | (Ok(()), Err(_)) => Ok(()),
+                    (Err(e), Err(_)) => Err(e),
+                }
+            }
+            Platform::Rk3588 => {
+                run(Command::new("fw_setenv").args(["upgrade_available", "0"]))?;
+                run(Command::new("fw_setenv").args(["bootcount", "0"]))
+            }
+            Platform::Bcm2711 | Platform::Bcm2712 | Platform::GenericArm => {
+                self.bless_boot_at(self.active_slot(), Path::new("/"))
+            }
+        }
+    }
+
+    /// Promote/clean up bootloader files under `root` for `active` slot.
+    pub fn bless_boot_at(self, active: Slot, root: &Path) -> Result<(), HalError> {
+        match self {
+            Platform::X86_64 => bless_systemd_boot_at(active, root),
+            Platform::Bcm2711 | Platform::Bcm2712 => bless_rpi_boot_at(active, root),
+            Platform::Rk3588 | Platform::GenericArm => {
+                let extlinux = root.join("boot/extlinux/extlinux.conf");
+                if extlinux.exists() {
+                    update_extlinux_slot(self, active, root)?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
 /// Rewrite every `root=<from>` in an extlinux config to `root=<to>`.
 pub fn point_extlinux_at(config: &str, to: &str, from: &str) -> String {
     config.replace(&format!("root={from}"), &format!("root={to}"))
+}
+
+fn write_file_atomic(path: &Path, contents: &[u8]) -> Result<(), HalError> {
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".tmp");
+    let tmp = PathBuf::from(tmp_os);
+    let mut f = fs::File::create(&tmp).map_err(|e| HalError::Io(tmp.clone(), e))?;
+    if let Err(e) = f.write_all(contents).and_then(|()| f.sync_all()) {
+        drop(f);
+        let _ = fs::remove_file(&tmp);
+        return Err(HalError::Io(tmp, e));
+    }
+    drop(f);
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(HalError::Io(path.to_path_buf(), e));
+    }
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
+fn sorted_conf_entries(entries_dir: &Path) -> Result<Vec<PathBuf>, HalError> {
+    let rd = fs::read_dir(entries_dir).map_err(|e| HalError::Io(entries_dir.to_path_buf(), e))?;
+    let mut paths: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".conf"))
+        })
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+fn is_slot_counted_entry(name: &str, prefix: &str) -> bool {
+    name.ends_with(".conf")
+        && name
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('+'))
+}
+
+fn is_slot_exhausted_entry(name: &str, prefix: &str) -> bool {
+    name.ends_with(".conf")
+        && name
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest == "+0.conf" || rest.starts_with("+0-"))
+}
+
+fn set_systemd_boot_default(contents: &str, default_pattern: &str) -> String {
+    let target = format!("default {default_pattern}");
+    let mut replaced = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        let is_default = trimmed == "default"
+            || trimmed.starts_with("default ")
+            || trimmed.starts_with("default\t");
+        if is_default {
+            if !replaced {
+                lines.push(target.clone());
+                replaced = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        lines.push(target);
+    }
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+fn commit_systemd_boot_at(slot: Slot, root: &Path) -> Result<(), HalError> {
+    let entries_dir = root.join("efi/loader/entries");
+    let prefix = slot.systemd_entry_prefix();
+    let clean_path = entries_dir.join(format!("{prefix}.conf"));
+    let entries = sorted_conf_entries(&entries_dir)?;
+
+    let template_path = if clean_path.is_file() {
+        clean_path.clone()
+    } else {
+        entries
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| is_slot_counted_entry(n, prefix))
+            })
+            .cloned()
+            .ok_or_else(|| {
+                HalError::Bootloader(format!(
+                    "no systemd-boot entry found for slot {} in {}",
+                    slot.id(),
+                    entries_dir.display()
+                ))
+            })?
+    };
+
+    let template =
+        fs::read_to_string(&template_path).map_err(|e| HalError::Io(template_path.clone(), e))?;
+    let staged_name = format!("{prefix}+3.conf");
+    let staged_path = entries_dir.join(&staged_name);
+    write_file_atomic(&staged_path, template.as_bytes())?;
+
+    if clean_path.is_file() {
+        fs::remove_file(&clean_path).map_err(|e| HalError::Io(clean_path.clone(), e))?;
+    }
+    for path in entries {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if is_slot_counted_entry(name, prefix) && name != staged_name {
+                fs::remove_file(&path).map_err(|e| HalError::Io(path.clone(), e))?;
+            }
+        }
+    }
+
+    let loader_conf = root.join("efi/loader/loader.conf");
+    let loader_contents =
+        fs::read_to_string(&loader_conf).map_err(|e| HalError::Io(loader_conf.clone(), e))?;
+    let updated = set_systemd_boot_default(&loader_contents, &format!("{prefix}*.conf"));
+    write_file_atomic(&loader_conf, updated.as_bytes())
+}
+
+fn bless_systemd_boot_at(active: Slot, root: &Path) -> Result<(), HalError> {
+    let entries_dir = root.join("efi/loader/entries");
+    let active_prefix = active.systemd_entry_prefix();
+    let active_clean = entries_dir.join(format!("{active_prefix}.conf"));
+    let entries = sorted_conf_entries(&entries_dir)?;
+
+    let active_counted: Vec<PathBuf> = entries
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| is_slot_counted_entry(n, active_prefix))
+        })
+        .cloned()
+        .collect();
+
+    if let Some((first, rest)) = active_counted.split_first() {
+        fs::rename(first, &active_clean).map_err(|e| HalError::Io(active_clean.clone(), e))?;
+        for dup in rest {
+            let _ = fs::remove_file(dup);
+        }
+    } else if !active_clean.is_file() {
+        return Err(HalError::Bootloader(format!(
+            "missing systemd-boot entry for active slot {} in {}",
+            active.id(),
+            entries_dir.display()
+        )));
+    }
+
+    let other_prefix = active.other().systemd_entry_prefix();
+    let other_clean = entries_dir.join(format!("{other_prefix}.conf"));
+    let other_exhausted: Vec<PathBuf> = entries
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| is_slot_exhausted_entry(n, other_prefix))
+        })
+        .cloned()
+        .collect();
+
+    if let Some((first, rest)) = other_exhausted.split_first() {
+        if !other_clean.is_file() {
+            fs::rename(first, &other_clean).map_err(|e| HalError::Io(other_clean.clone(), e))?;
+        } else {
+            fs::remove_file(first).map_err(|e| HalError::Io(first.clone(), e))?;
+        }
+        for dup in rest {
+            let _ = fs::remove_file(dup);
+        }
+    }
+
+    let loader_conf = root.join("efi/loader/loader.conf");
+    if loader_conf.is_file() {
+        let loader_contents =
+            fs::read_to_string(&loader_conf).map_err(|e| HalError::Io(loader_conf.clone(), e))?;
+        let updated = set_systemd_boot_default(&loader_contents, &format!("{active_prefix}*.conf"));
+        if updated != loader_contents {
+            write_file_atomic(&loader_conf, updated.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+fn set_rpi_os_prefix(config: &str, slot: Slot) -> String {
+    let target = format!("os_prefix=slot-{}/", slot.id());
+    let mut replaced = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in config.lines() {
+        let trimmed = line.trim();
+        let is_os_prefix = !trimmed.starts_with('#')
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(k, _)| k.trim() == "os_prefix");
+        if is_os_prefix {
+            if !replaced {
+                lines.push(target.clone());
+                replaced = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        if let Some(pos) = lines.iter().position(|l| l.trim() == "[all]") {
+            lines.insert(pos + 1, target);
+        } else if let Some(pos) = lines
+            .iter()
+            .position(|l| l.trim().starts_with('[') && l.trim().ends_with(']'))
+        {
+            lines.insert(pos, target);
+        } else {
+            lines.push(target);
+        }
+    }
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+fn commit_rpi_tryboot_at(slot: Slot, root: &Path) -> Result<(), HalError> {
+    let boot_dir = root.join("boot");
+    let config_path = boot_dir.join("config.txt");
+    let tryboot_path = boot_dir.join("tryboot.txt");
+    let config =
+        fs::read_to_string(&config_path).map_err(|e| HalError::Io(config_path.clone(), e))?;
+    let tryboot = set_rpi_os_prefix(&config, slot);
+    write_file_atomic(&tryboot_path, tryboot.as_bytes())
+}
+
+fn bless_rpi_boot_at(active: Slot, root: &Path) -> Result<(), HalError> {
+    let boot_dir = root.join("boot");
+    let config_path = boot_dir.join("config.txt");
+    let tryboot_path = boot_dir.join("tryboot.txt");
+    let config =
+        fs::read_to_string(&config_path).map_err(|e| HalError::Io(config_path.clone(), e))?;
+    let updated = set_rpi_os_prefix(&config, active);
+    if updated != config {
+        write_file_atomic(&config_path, updated.as_bytes())?;
+    }
+    match fs::remove_file(&tryboot_path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(HalError::Io(tryboot_path, e)),
+    }
+}
+
+fn update_extlinux_slot(platform: Platform, slot: Slot, root: &Path) -> Result<(), HalError> {
+    let extlinux = root.join("boot/extlinux/extlinux.conf");
+    let config = fs::read_to_string(&extlinux).map_err(|e| {
+        HalError::Bootloader(format!("{} unreadable: {e}", extlinux.display()))
+    })?;
+    let target_part = slot.partlabel();
+    let other = slot.other();
+    let mut rewritten = point_extlinux_at(&config, target_part, other.partlabel());
+    rewritten = point_extlinux_at(&rewritten, target_part, platform.slot_device(other));
+    rewritten = point_extlinux_at(&rewritten, target_part, other.legacy_device());
+    rewritten = point_extlinux_at(&rewritten, target_part, platform.slot_device(slot));
+    rewritten = point_extlinux_at(&rewritten, target_part, slot.legacy_device());
+    if rewritten != config {
+        write_file_atomic(&extlinux, rewritten.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn run(cmd: &mut Command) -> Result<(), HalError> {

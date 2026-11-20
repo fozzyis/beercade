@@ -1,0 +1,275 @@
+diff --git a/gfx/common/vulkan_common.c b/gfx/common/vulkan_common.c
+index e4f7c08..ff76519 100644
+--- a/gfx/common/vulkan_common.c
++++ b/gfx/common/vulkan_common.c
+@@ -39,6 +39,11 @@
+ #include "../../verbosity.h"
+ #include "../../configuration.h"
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++/* Beercade A.S.T.R.O. 1000 Hz evdev input ABI (-lastro_rt). */
++#include <astro_rt/input_events.h>
++#endif
++
+ #ifdef _WIN32
+ #include <windows.h>
+ #endif
+@@ -2644,6 +2649,22 @@ void vulkan_context_destroy(gfx_ctx_vulkan_data_t *vk,
+    }
+ }
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++/* Drain the 1000 Hz SPSC evdev ring immediately before VSync/swap presentation
++ * (used by khr_display and Vulkan WSI context drivers).  Preallocated static
++ * batch buffer: no heap allocations and no locks in the hot path. */
++static void astro_vulkan_input_drain_pre_present(void)
++{
++   static struct astro_input_event batch[ASTRO_INPUT_DRAIN_MAX];
++
++   (void)astro_input_drain(batch, ASTRO_INPUT_DRAIN_MAX);
++}
++#else
++static void astro_vulkan_input_drain_pre_present(void)
++{
++}
++#endif
++
+ void vulkan_present(gfx_ctx_vulkan_data_t *vk, unsigned index)
+ {
+    VkPresentInfoKHR present;
+@@ -2659,6 +2680,8 @@ void vulkan_present(gfx_ctx_vulkan_data_t *vk, unsigned index)
+    present.pImageIndices           = &index;
+    present.pResults                = &result;
+ 
++   astro_vulkan_input_drain_pre_present();
++
+    /* Better hope QueuePresent doesn't block D: */
+ #ifdef HAVE_THREADS
+    slock_lock(vk->context.queue_lock);
+diff --git a/input/drivers_joypad/udev_joypad.c b/input/drivers_joypad/udev_joypad.c
+index ee1d474..15da787 100644
+--- a/input/drivers_joypad/udev_joypad.c
++++ b/input/drivers_joypad/udev_joypad.c
+@@ -42,6 +42,11 @@
+ 
+ #include "../../verbosity.h"
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++/* Beercade A.S.T.R.O. 1000 Hz evdev SPSC ring ABI (-lastro_rt). */
++#include <astro_rt/input_events.h>
++#endif
++
+ /* Udev/evdev Linux joypad driver.
+  * More complex and extremely low level,
+  * but only Linux driver which can support joypad rumble.
+@@ -103,6 +108,11 @@ static struct udev *udev_joypad_fd             = NULL;
+ static struct udev_monitor *udev_joypad_mon    = NULL;
+ static struct udev_joypad udev_pads[MAX_USERS];
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++static bool astro_rt_active = false;
++static struct astro_pad_state astro_rt_pads[ASTRO_INPUT_MAX_PORTS];
++#endif
++
+ static INLINE int16_t udev_compute_axis(const struct input_absinfo *info, int value)
+ {
+    int range = info->maximum - info->minimum;
+@@ -393,6 +403,15 @@ static void udev_joypad_destroy(void)
+ {
+    int i;
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++   if (astro_rt_active)
++   {
++      astro_input_stop();
++      astro_rt_active = false;
++   }
++   memset(astro_rt_pads, 0, sizeof(astro_rt_pads));
++#endif
++
+    for (i = 0; i < MAX_USERS; i++)
+       udev_free_pad(i);
+ 
+@@ -497,6 +516,11 @@ static void udev_joypad_poll(void)
+ {
+    unsigned p;
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++   if (astro_rt_active)
++      astro_input_poll_frame(astro_rt_pads, ASTRO_INPUT_MAX_PORTS);
++#endif
++
+    while (udev_joypad_mon && udev_joypad_poll_hotplug_available(udev_joypad_mon))
+    {
+       struct udev_device *dev = udev_monitor_receive_device(udev_joypad_mon);
+@@ -537,6 +561,11 @@ static void udev_joypad_poll(void)
+       if (pad->fd < 0)
+          continue;
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++      if (astro_rt_active && p < ASTRO_INPUT_MAX_PORTS)
++         continue;
++#endif
++
+       while ((_len = read(pad->fd, events, sizeof(events))) > 0)
+       {
+          _len /= sizeof(*events);
+@@ -601,6 +630,9 @@ static void *udev_joypad_init(void *data)
+    struct udev_list_entry *item     = NULL;
+    struct udev_enumerate *enumerate = NULL;
+    struct joypad_udev_entry sorted[MAX_USERS];
++#ifdef HAVE_ASTRO_RT_INPUT
++   struct astro_input_config astro_cfg;
++#endif
+ 
+    for (i = 0; i < MAX_USERS; i++)
+       udev_pads[i].fd = -1;
+@@ -645,6 +677,27 @@ static void *udev_joypad_init(void *data)
+ 
+    udev_enumerate_unref(enumerate);
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++   memset(&astro_cfg, 0, sizeof(astro_cfg));
++   astro_cfg.fifo_priority    = 90;
++   astro_cfg.pin_cpu_first    = 0;
++   astro_cfg.pin_cpu_last     = 3;
++   astro_cfg.mlockall_enable  = 1;
++   astro_cfg.ppoll_timeout_ms = 0;
++   astro_cfg.log_level        = ASTRO_LOG_ERROR;
++   if (astro_input_start(&astro_cfg) == 0)
++   {
++      astro_rt_active = true;
++      RARCH_LOG("[udev] astro_rt 1000Hz SPSC input active (%s).\n",
++            astro_input_ident());
++   }
++   else
++   {
++      astro_rt_active = false;
++      RARCH_ERR("[udev] astro_input_start() failed, using fallback udev polling.\n");
++   }
++#endif
++
+    return (void*)-1;
+ 
+ error:
+@@ -690,6 +743,28 @@ static int32_t udev_joypad_button(unsigned port, uint16_t joykey)
+       &udev_pads[port];
+    if (port >= MAX_USERS)
+       return 0;
++#ifdef HAVE_ASTRO_RT_INPUT
++   if (astro_rt_active && port < ASTRO_INPUT_MAX_PORTS)
++   {
++      unsigned hat_dir = GET_HAT_DIR(joykey);
++      if (joykey == NO_BTN)
++         return 0;
++      if (hat_dir)
++      {
++         switch (hat_dir)
++         {
++            case HAT_LEFT_MASK:  return astro_input_button(port, ASTRO_BTN_LEFT);
++            case HAT_RIGHT_MASK: return astro_input_button(port, ASTRO_BTN_RIGHT);
++            case HAT_UP_MASK:    return astro_input_button(port, ASTRO_BTN_UP);
++            case HAT_DOWN_MASK:  return astro_input_button(port, ASTRO_BTN_DOWN);
++            default:             return 0;
++         }
++      }
++      if (joykey < 16)
++         return astro_input_button(port, joykey);
++      return 0;
++   }
++#endif
+    return udev_joypad_button_state(pad, port, joykey);
+ }
+ 
+@@ -698,6 +773,21 @@ static void udev_joypad_get_buttons(unsigned port, input_bits_t *state)
+ 	const struct udev_joypad *pad = (const struct udev_joypad*)
+       &udev_pads[port];
+ 
++#ifdef HAVE_ASTRO_RT_INPUT
++   if (astro_rt_active && port < ASTRO_INPUT_MAX_PORTS)
++   {
++      unsigned b;
++      uint64_t mask = 0;
++      for (b = 0; b < 16; b++)
++      {
++         if (astro_input_button(port, b))
++            mask |= (1ULL << b);
++      }
++      BITS_COPY64_PTR(state, mask);
++      return;
++   }
++#endif
++
+ 	if (pad)
+    {
+ 		BITS_COPY64_PTR( state, pad->buttons );
+@@ -741,6 +831,28 @@ static int16_t udev_joypad_axis(unsigned port, uint32_t joyaxis)
+ {
+    const struct udev_joypad *pad = (const struct udev_joypad*)
+       &udev_pads[port];
++   if (port >= MAX_USERS)
++      return 0;
++#ifdef HAVE_ASTRO_RT_INPUT
++   if (astro_rt_active && port < ASTRO_INPUT_MAX_PORTS)
++   {
++      if (AXIS_NEG_GET(joyaxis) < ASTRO_INPUT_MAX_AXES)
++      {
++         int16_t val = astro_input_axis(port, AXIS_NEG_GET(joyaxis));
++         if (val < 0)
++            return val;
++         return 0;
++      }
++      else if (AXIS_POS_GET(joyaxis) < ASTRO_INPUT_MAX_AXES)
++      {
++         int16_t val = astro_input_axis(port, AXIS_POS_GET(joyaxis));
++         if (val > 0)
++            return val;
++         return 0;
++      }
++      return 0;
++   }
++#endif
+    return udev_joypad_axis_state(pad, port, joyaxis);
+ }
+ 
+@@ -757,6 +869,29 @@ static int16_t udev_joypad_state(
+       int i;
+       const struct udev_joypad *pad     = (const struct udev_joypad*)
+          &udev_pads[port_idx];
++#ifdef HAVE_ASTRO_RT_INPUT
++      if (astro_rt_active && port_idx < ASTRO_INPUT_MAX_PORTS)
++      {
++         for (i = 0; i < RARCH_FIRST_CUSTOM_BIND; i++)
++         {
++            const uint64_t joykey  = (binds[i].joykey != NO_BTN)
++               ? binds[i].joykey  : joypad_info->auto_binds[i].joykey;
++            const uint32_t joyaxis = (binds[i].joyaxis != AXIS_NONE)
++               ? binds[i].joyaxis : joypad_info->auto_binds[i].joyaxis;
++            if (i < 16 && astro_input_button(port_idx, (unsigned)i))
++               ret |= (1 << i);
++            else if ((uint16_t)joykey != NO_BTN
++                  && GET_HAT_DIR((uint16_t)joykey)
++                  && udev_joypad_button(port_idx, (uint16_t)joykey))
++               ret |= (1 << i);
++            else if (joyaxis != AXIS_NONE &&
++                  ((float)abs(udev_joypad_axis(port_idx, joyaxis))
++                   / 0x8000) > joypad_info->axis_threshold)
++               ret |= (1 << i);
++         }
++         return ret;
++      }
++#endif
+       for (i = 0; i < RARCH_FIRST_CUSTOM_BIND; i++)
+       {
+          /* Auto-binds are per joypad, not per user. */
+@@ -781,6 +916,10 @@ static int16_t udev_joypad_state(
+ 
+ static bool udev_joypad_query_pad(unsigned pad)
+ {
++#ifdef HAVE_ASTRO_RT_INPUT
++   if (astro_rt_active && pad < ASTRO_INPUT_MAX_PORTS && astro_rt_pads[pad].connected)
++      return true;
++#endif
+    return pad < MAX_USERS && udev_pads[pad].fd >= 0;
+ }
+ 

@@ -575,9 +575,13 @@ fn main() -> Result<(), String> {
         if let Some(f) = link.poll() {
             ui.set_frame(f);
         }
+        let frame_start = Instant::now();
         let mut painter = Painter { canvas: &mut canvas, tc: &tc, fonts: &fonts };
         draw(&mut painter, &ui, started);
         canvas.present();
-        std::thread::sleep(Duration::from_millis(16));
+        let elapsed = frame_start.elapsed();
+        if elapsed < Duration::from_millis(4) {
+            std::thread::sleep(Duration::from_millis(4) - elapsed);
+        }
     }
 }
