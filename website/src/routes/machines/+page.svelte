@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { playClickSound } from '$lib/audio';
 	import machinesHero from '$lib/assets/machines_hero.jpg';
+	import type { VenueTelemetryReport } from '$lib/types/telemetry';
 
 	let telemetry = $state<{
 		timestamp: string;
@@ -15,7 +16,7 @@
 			current_game: string;
 			status: string;
 			session_duration_sec: number;
-			cpu_temp_c?: number;
+			cpu_temp_c?: number | null;
 			fps?: number;
 			credits_available?: number;
 		}>;
@@ -80,14 +81,40 @@
 			})
 			.catch(console.error);
 
-		const eventSource = new EventSource('/api/telemetry/stream');
-		eventSource.onmessage = (event) => {
+		const eventSource = new EventSource('/api/v1/edge/stream?channels=venue');
+		eventSource.addEventListener('venue', (event) => {
 			try {
-				telemetry = JSON.parse(event.data);
+				const report = JSON.parse((event as MessageEvent).data) as VenueTelemetryReport;
+				const nodes = Array.isArray(report.nodes) ? report.nodes : [];
+				telemetry = {
+					timestamp: new Date(report.generated_at_epoch_ms || Date.now()).toISOString(),
+					venue_status: report.status || 'OPEN',
+					machines_total: telemetry?.machines_total ?? Math.max(36, nodes.length),
+					machines_active: report.nodes_online ?? nodes.length,
+					astro_nodes: nodes.map((n) => {
+						const mode = n.mode && typeof n.mode === 'object' ? (n.mode as Record<string, unknown>) : null;
+						const playing = Boolean(mode?.playing || mode?.type === 'Managed');
+						return {
+							node_id: n.node_id,
+							hardware: n.soc ? `${n.hardware} (${n.soc})` : n.hardware,
+							current_core: n.active_core,
+							current_game: n.active_rom || n.active_core || 'IDLE',
+							status:
+								playing || (n.credits?.credits_available ?? 0) > 0
+									? 'IN_USE'
+									: 'AVAILABLE',
+							session_duration_sec: 0,
+							cpu_temp_c: n.cpu_temp_c ?? null,
+							fps: n.fps,
+							credits_available: n.credits?.credits_available ?? 0
+						};
+					}),
+					featured_highscores: telemetry?.featured_highscores ?? []
+				};
 			} catch (err) {
 				console.error('Failed to parse telemetry event:', err);
 			}
-		};
+		});
 
 		return () => eventSource.close();
 	});

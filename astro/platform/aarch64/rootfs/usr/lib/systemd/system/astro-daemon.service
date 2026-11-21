@@ -1,6 +1,6 @@
 [Unit]
 Description=A.S.T.R.O. node daemon
-After=network.target local-fs.target
+After=network.target local-fs.target astro-tune.service
 
 [Service]
 Type=simple

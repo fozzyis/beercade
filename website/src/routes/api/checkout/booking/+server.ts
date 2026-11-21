@@ -102,10 +102,9 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 		const now = Date.now();
 		const bookingRef = `BK-RES-${now.toString(36).toUpperCase()}`;
 
-		const envRecord = (platform?.env ?? {}) as Record<string, unknown>;
 		const stripeSecretKey =
-			(typeof envRecord.STRIPE_SECRET_KEY === 'string' ? envRecord.STRIPE_SECRET_KEY : '') ||
-			process.env.STRIPE_SECRET_KEY ||
+			platform?.env?.STRIPE_SECRET_KEY ||
+			(typeof process !== 'undefined' ? process.env?.STRIPE_SECRET_KEY : undefined) ||
 			'';
 
 		let stripeSessionId: string | null = null;
@@ -146,41 +145,39 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 			checkoutUrl = session.url;
 		}
 
+		const status = checkoutUrl ? 'PENDING_STRIPE' : 'CONFIRMED';
+
 		const db = platform?.env?.DB;
 		if (db) {
-			try {
-				await db
-					.prepare(
-						`INSERT INTO function_bookings
-						 (booking_ref, event_type, booking_date, booking_time, headcount, area, drink_bundle,
-						  food_preorders_json, deposit_amount, food_total, token_addon_amount, total_amount,
-						  contact_name, contact_email, contact_phone, stripe_session_id, status, created_at_ms)
-						 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)`
-					)
-					.bind(
-						bookingRef,
-						String(eventType),
-						String(date),
-						String(time || '18:00'),
-						guests,
-						String(area),
-						String(drinkBundle),
-						JSON.stringify(foodPreOrders),
-						baseDeposit,
-						foodTotal,
-						addonAmt,
-						totalAmount,
-						String(contactName || 'Guest'),
-						String(contactEmail),
-						String(contactPhone || ''),
-						stripeSessionId,
-						checkoutUrl ? 'PENDING_STRIPE' : 'CONFIRMED',
-						now
-					)
-					.run();
-			} catch (dbErr) {
-				console.warn('D1 function_bookings insert skipped:', dbErr);
-			}
+			await db
+				.prepare(
+					`INSERT INTO function_bookings
+					 (booking_ref, event_type, booking_date, booking_time, headcount, area, drink_bundle,
+					  food_preorders_json, deposit_amount, food_total, token_addon_amount, total_amount,
+					  contact_name, contact_email, contact_phone, stripe_session_id, status, created_at_ms)
+					 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)`
+				)
+				.bind(
+					bookingRef,
+					String(eventType),
+					String(date),
+					String(time || '18:00'),
+					guests,
+					String(area),
+					String(drinkBundle),
+					JSON.stringify(foodPreOrders),
+					baseDeposit,
+					foodTotal,
+					addonAmt,
+					totalAmount,
+					String(contactName || 'Guest'),
+					String(contactEmail),
+					String(contactPhone || ''),
+					stripeSessionId,
+					status,
+					now
+				)
+				.run();
 		}
 
 		const calendarQuery = new URLSearchParams({
@@ -200,7 +197,7 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 			foodTotal,
 			tokenAddonAmount: addonAmt,
 			totalPaid: totalAmount,
-			status: 'CONFIRMED',
+			status,
 			checkoutUrl,
 			summary: {
 				eventType,
@@ -213,7 +210,9 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 				contactPhone
 			},
 			calendarEventUrl: `/api/checkout/booking?${calendarQuery.toString()}`,
-			message: 'Function deposit and booking locked successfully!'
+			message: checkoutUrl
+				? 'Redirecting to Stripe to confirm deposit...'
+				: 'Function deposit and booking locked successfully!'
 		});
 	} catch (err) {
 		console.error('Function booking failed:', err);

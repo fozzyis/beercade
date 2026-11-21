@@ -170,6 +170,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let _ = beercade_hal::sd_notify_ready();
     println!("===============================================================");
     println!("   B.O.S.S. Central Server Active on http://{}", bind_addr);
     println!("   Serving Kiosk UI from: {}", static_dir);

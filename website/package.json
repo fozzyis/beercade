@@ -14,7 +14,8 @@
 		"gen": "wrangler types",
 		"generate-types": "node scripts/generate-types.cjs",
 		"lint": "prettier --check . && eslint .",
-		"format": "prettier --write ."
+		"format": "prettier --write .",
+		"test": "node --experimental-strip-types --test tests/*.test.mjs"
 	},
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",

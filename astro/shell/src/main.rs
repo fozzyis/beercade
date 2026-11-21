@@ -385,6 +385,10 @@ fn draw(p: &mut Painter, ui: &Ui, now: Instant) {
             p.text(&f.huge, "THANKS FOR PLAYING", c.accent, cx, 380, Align::Center);
             p.text(&f.mid, "See you next round at DOCKADE", c.dim, cx, 600, Align::Center);
         }
+        ShellView::Suspended => {
+            p.canvas.set_draw_color(Color::RGB(0, 0, 0));
+            p.canvas.clear();
+        }
     }
 }
 

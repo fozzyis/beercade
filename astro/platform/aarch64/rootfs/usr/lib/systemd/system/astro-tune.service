@@ -1,10 +1,11 @@
 [Unit]
 Description=A.S.T.R.O. latency tuning (governor, CPU partitioning, PM QoS)
-After=local-fs.target
-Before=astro-daemon.service display-manager.service
+Wants=astro-rt.slice
+After=local-fs.target astro-rt.slice
+Before=astro-daemon.service astro-frontend.service display-manager.service
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=/usr/bin/astro-tune
 Restart=on-failure
 

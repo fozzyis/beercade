@@ -32,6 +32,8 @@ jobs:
         run: cargo check --workspace --locked
       - name: Test
         run: cargo test --workspace --locked
+      - name: TypeScript wire proto drift check
+        run: cargo run -p beercade-shared --locked --bin gen_ts_proto -- --check
       - name: astro_rt CMake build & test
         run: |
           cmake -S astro/rt -B /tmp/astro_rt_build -G Ninja

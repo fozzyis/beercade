@@ -19,9 +19,9 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
-typeshare = "1.0"
 sha2 = "0.10"
 beercade-shared = { path = "../shared/crates/beercade-shared" }
+beercade-hal = { path = "../shared/crates/beercade-hal" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

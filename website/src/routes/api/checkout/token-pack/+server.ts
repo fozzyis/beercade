@@ -110,22 +110,18 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 			: `BEERCADE:VOUCHER:${voucherId}:${totalTokens}:${targetNodeId ?? 'ANY'}`;
 		const passUrl = `${url.origin}/tokens?voucher=${encodeURIComponent(voucherId)}`;
 
-		const envRecord = (platform?.env ?? {}) as Record<string, unknown>;
+		const env = platform?.env;
 		const squareAccessToken =
-			(typeof envRecord.SQUARE_ACCESS_TOKEN === 'string' ? envRecord.SQUARE_ACCESS_TOKEN : '') ||
-			process.env.SQUARE_ACCESS_TOKEN ||
+			env?.SQUARE_ACCESS_TOKEN ||
+			(typeof process !== 'undefined' ? process.env?.SQUARE_ACCESS_TOKEN : undefined) ||
 			'';
 		const squareLocationId =
-			(typeof envRecord.SQUARE_LOCATION_ID === 'string' ? envRecord.SQUARE_LOCATION_ID : '') ||
-			process.env.SQUARE_LOCATION_ID ||
+			env?.SQUARE_LOCATION_ID ||
+			(typeof process !== 'undefined' ? process.env?.SQUARE_LOCATION_ID : undefined) ||
 			'L_BEERCADE_REDFERN';
 		const stripeSecretKey =
-			(typeof envRecord.STRIPE_SECRET_KEY === 'string' ? envRecord.STRIPE_SECRET_KEY : '') ||
-			process.env.STRIPE_SECRET_KEY ||
-			'';
-		const bossUrl =
-			(typeof envRecord.BOSS_URL === 'string' ? envRecord.BOSS_URL : '') ||
-			process.env.BOSS_URL ||
+			env?.STRIPE_SECRET_KEY ||
+			(typeof process !== 'undefined' ? process.env?.STRIPE_SECRET_KEY : undefined) ||
 			'';
 
 		let stripeSessionId: string | null = null;
@@ -214,61 +210,31 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 			paymentProvider = 'Stripe Checkout';
 		}
 
-		// Sync A.S.T.R.O. Game-Time Pass directly with B.O.S.S. `pos-payments` plugin when BOSS_URL is reachable
-		let bossSynced = false;
-		if (bossUrl.trim() && (passSpec || targetNodeId)) {
-			try {
-				const bossRes = await fetch(
-					`${bossUrl.replace(/\/$/, '')}/api/v1/plugins/pos-payments/action`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							action: 'activate_game_time_pass',
-							payload: {
-								node_id: targetNodeId || 'ASTRO-01',
-								pass_code: voucherId,
-								duration_mins: durationMins ?? 30,
-								credits: totalTokens,
-								amount_cents: amount * quantity * 100,
-								patron_name: email.split('@')[0],
-								provider: paymentProvider
-							}
-						})
-					}
-				);
-				bossSynced = bossRes.ok;
-			} catch {
-				// B.O.S.S. sync optional when edge-only
-			}
-		}
+		const status = checkoutUrl ? 'PENDING_PAYMENT' : 'ISSUED';
+		const bossSynced = false;
 
-		// Persist to Cloudflare D1 when bound
+		// Persist to Cloudflare D1 when bound (propagate errors rather than masking persistence failures)
 		const db = platform?.env?.DB;
 		if (db) {
-			try {
-				await db
-					.prepare(
-						`INSERT INTO token_vouchers
-						 (voucher_id, email, amount_aud, base_tokens, bonus_tokens, total_tokens, target_node_id, stripe_session_id, status, created_at_ms)
-						 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
-					)
-					.bind(
-						voucherId,
-						email,
-						amount * quantity,
-						baseTokens,
-						bonusTokens,
-						totalTokens,
-						targetNodeId,
-						stripeSessionId,
-						checkoutUrl ? 'PENDING_PAYMENT' : 'ISSUED',
-						now
-					)
-					.run();
-			} catch (dbErr) {
-				console.warn('D1 token_vouchers insert skipped:', dbErr);
-			}
+			await db
+				.prepare(
+					`INSERT INTO token_vouchers
+					 (voucher_id, email, amount_aud, base_tokens, bonus_tokens, total_tokens, target_node_id, stripe_session_id, status, created_at_ms)
+					 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+				)
+				.bind(
+					voucherId,
+					email,
+					amount * quantity,
+					baseTokens,
+					bonusTokens,
+					totalTokens,
+					targetNodeId,
+					stripeSessionId,
+					status,
+					now
+				)
+				.run();
 		}
 
 		return json({
@@ -281,6 +247,7 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 			durationMins,
 			passLabel: passSpec?.label ?? null,
 			paymentProvider,
+			status,
 			bossSynced,
 			targetNodeId,
 			qrData,

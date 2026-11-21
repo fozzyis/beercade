@@ -4,7 +4,17 @@ import type { VenueLatestSnapshot } from '$lib/types/telemetry';
 const DEFAULT_VENUE = 'Beercade Redfern (The BK)';
 
 export const GET: RequestHandler = async ({ platform }) => {
-	let astroNodes = [
+	let astroNodes: Array<{
+		node_id: string;
+		hardware: string;
+		current_core: string;
+		current_game: string;
+		status: string;
+		session_duration_sec: number;
+		cpu_temp_c: number | null;
+		fps: number;
+		credits_available: number;
+	}> = [
 		{
 			node_id: 'ASTRO-01',
 			hardware: 'O.R.I.O.N. Radxa ROCK 5C 32GB (RK3588S2)',
@@ -74,7 +84,7 @@ export const GET: RequestHandler = async ({ platform }) => {
 						current_game: n.active_rom,
 						status: n.credits.credits_available > 0 ? 'IN_USE' : 'AVAILABLE',
 						session_duration_sec: 300,
-						cpu_temp_c: n.cpu_temp_c,
+						cpu_temp_c: n.cpu_temp_c ?? null,
 						fps: n.fps,
 						credits_available: n.credits.credits_available
 					}));

@@ -21,12 +21,12 @@ check_astro_health() {
 
 check_boss_health() {
   local i
-  for i in $(seq 1 60); do
+  for i in $(seq 1 5); do
     if systemctl is-active --quiet boss-server.service \
       && curl -fsS -o /dev/null http://127.0.0.1:8080/api/health; then
       return 0
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "beercade-boot-check: boss-server health check failed" >&2
   return 1

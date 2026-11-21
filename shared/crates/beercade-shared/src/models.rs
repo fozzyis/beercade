@@ -350,6 +350,26 @@ pub struct EdgeBatchEnvelope {
     pub scores: Vec<HighScoreEntry>,
 }
 
+/// Multiplexed server-to-cabinet push message over `/api/v1/ws/telemetry`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "typeshare", typeshare)]
+pub enum WsServerMessage {
+    Command {
+        record: CommandRecord,
+    },
+    ThemeChanged {
+        theme: String,
+    },
+    PayloadAvailable {
+        filename: String,
+        #[serde(default)]
+        sha256: Option<String>,
+        #[serde(default)]
+        size_bytes: Option<u64>,
+    },
+}
+
 /// Helper returning the current Unix timestamp in milliseconds.
 pub fn now_epoch_ms() -> u64 {
     std::time::SystemTime::now()

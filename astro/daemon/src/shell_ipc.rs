@@ -89,6 +89,9 @@ async fn handle(state_arc: &Arc<RwLock<DaemonSharedState>>, client: &reqwest::Cl
                 .unwrap_or_default();
             crate::apply_session_effects(state_arc, fx);
         }
+        ShellAction::DisplayReleased => {
+            // Handled by suspend handshake in Wave 3B.
+        }
     }
 }
 

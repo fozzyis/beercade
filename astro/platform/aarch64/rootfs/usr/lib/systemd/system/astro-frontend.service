@@ -1,9 +1,8 @@
 [Unit]
 Description=A.S.T.R.O. customer screen (astro-shell on KMS, tty1)
-After=astro-tune.service systemd-user-sessions.service local-fs.target
+After=astro-tune.service astro-daemon.service local-fs.target
 RequiresMountsFor=/data
 Conflicts=getty@tty1.service
-After=getty@tty1.service
 OnFailure=getty@tty1.service
 StartLimitIntervalSec=120
 StartLimitBurst=5

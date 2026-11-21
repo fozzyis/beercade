@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import heroBg from '$lib/assets/hero_bg.jpg';
+  import type { VenueTelemetryReport } from '$lib/types/telemetry';
 
   let telemetry = $state<{
     machines_active: number;
@@ -19,10 +20,28 @@
       .then(d => { telemetry = d as any; })
       .catch(console.error);
 
-    const es = new EventSource('/api/telemetry/stream');
-    es.onmessage = (e) => {
-      try { telemetry = JSON.parse(e.data); } catch (err) {}
-    };
+    const es = new EventSource('/api/v1/edge/stream?channels=venue');
+    es.addEventListener('venue', (e) => {
+      try {
+        const report = JSON.parse((e as MessageEvent).data) as VenueTelemetryReport;
+        const nodes = Array.isArray(report.nodes) ? report.nodes : [];
+        telemetry = {
+          machines_active: report.nodes_online ?? nodes.length,
+          machines_total: telemetry?.machines_total ?? Math.max(36, nodes.length),
+          astro_nodes: nodes.map((n) => {
+            const mode = n.mode && typeof n.mode === 'object' ? (n.mode as Record<string, unknown>) : null;
+            const playing = Boolean(mode?.playing || mode?.type === 'Managed');
+            return {
+              node_id: n.node_id,
+              current_game: n.active_rom || n.active_core || 'IDLE',
+              status: playing || (n.credits?.credits_available ?? 0) > 0 ? 'IN_USE' : 'AVAILABLE'
+            };
+          })
+        };
+      } catch {
+        // Ignore malformed SSE payload
+      }
+    });
 
     // Slot machine roll: count up from 0 with rapid digit flicker
     let step = 0;

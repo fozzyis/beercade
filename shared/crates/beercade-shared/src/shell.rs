@@ -42,6 +42,8 @@ pub enum ShellView {
     },
     /// Session over, waiting for B.O.S.S. to start attract mode.
     Ended,
+    /// Resident shell should drop DRM master so the emulator can take the display.
+    Suspended,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -57,6 +59,8 @@ pub enum ShellAction {
     Launch { game_id: String },
     /// The player chose "Change my games" (B.O.S.S. is told).
     ChangeGames,
+    /// Resident shell released DRM master and is ready for SIGSTOP.
+    DisplayReleased,
 }
 
 #[cfg(test)]
@@ -75,5 +79,21 @@ mod tests {
         assert_eq!(serde_json::from_str::<ShellFrame>(&json).unwrap(), f);
         let a: ShellAction = serde_json::from_str(r#"{"action":"launch","game_id":"dkc"}"#).unwrap();
         assert_eq!(a, ShellAction::Launch { game_id: "dkc".into() });
+
+        let suspended = ShellFrame {
+            node_id: "ASTRO-01".into(),
+            theme: "taproom".into(),
+            view: ShellView::Suspended,
+        };
+        let suspended_json = serde_json::to_string(&suspended).unwrap();
+        assert!(suspended_json.contains(r#""screen":"suspended""#));
+        assert_eq!(serde_json::from_str::<ShellFrame>(&suspended_json).unwrap(), suspended);
+
+        let released_json = serde_json::to_string(&ShellAction::DisplayReleased).unwrap();
+        assert_eq!(released_json, r#"{"action":"display_released"}"#);
+        assert_eq!(
+            serde_json::from_str::<ShellAction>(&released_json).unwrap(),
+            ShellAction::DisplayReleased
+        );
     }
 }

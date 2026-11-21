@@ -3,16 +3,24 @@
 # Domains: boss | astro | website | shared
 # ==============================================================================
 
-.PHONY: all check test build-boss build-astro build-website clean image-x86 verify-x86 image-boss-x86 verify-boss-x86 image-boss-rpi
+.PHONY: all check check-cargo check-types check-website check-kiosk gen-types test build-boss build-astro build-website clean image-x86 verify-x86 image-boss-x86 verify-boss-x86 image-boss-rpi
 
 all: check test
 
 # Validate syntax and tree integrity across all workspaces
-check: check-cargo check-website check-kiosk
+check: check-cargo check-types check-website check-kiosk
 
 check-cargo:
 	@echo "=== Checking Cargo Workspaces (boss, astro/daemon, shared) ==="
 	cargo check --workspace
+
+check-types:
+	@echo "=== Checking Shared TypeScript Wire Protocol ==="
+	cargo run -p beercade-shared --locked --bin gen_ts_proto -- --check
+
+gen-types:
+	@echo "=== Generating Shared TypeScript Wire Protocol ==="
+	cargo run -p beercade-shared --locked --bin gen_ts_proto -- --write
 
 check-website:
 	@echo "=== Checking Customer Website (SvelteKit) ==="

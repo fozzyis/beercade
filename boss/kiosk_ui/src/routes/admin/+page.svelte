@@ -598,8 +598,8 @@
 							<div class="telemetry-metrics">
 								<div class="metric-box">
 									<span>CPU / GPU TEMP</span>
-									<strong class={t.cpu_temp_c >= 75 ? 'warn-text' : ''}>
-										{t.cpu_temp_c.toFixed(1)}°C / {t.gpu_temp_c.toFixed(1)}°C
+									<strong class={(t.cpu_temp_c ?? 0) >= 75 ? 'warn-text' : ''}>
+										{t.cpu_temp_c != null ? `${t.cpu_temp_c.toFixed(1)}°C` : '--'} / {t.gpu_temp_c != null ? `${t.gpu_temp_c.toFixed(1)}°C` : '--'}
 									</strong>
 								</div>
 								<div class="metric-box">

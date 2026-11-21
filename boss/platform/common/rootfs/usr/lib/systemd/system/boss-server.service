@@ -4,7 +4,7 @@ After=network.target local-fs.target systemd-tmpfiles-setup.service
 RequiresMountsFor=/data
 
 [Service]
-Type=simple
+Type=notify
 User=boss
 Group=boss
 WorkingDirectory=/usr/share/boss

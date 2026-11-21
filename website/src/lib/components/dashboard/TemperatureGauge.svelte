@@ -6,7 +6,7 @@
 	 */
 	interface Props {
 		label: string;
-		value: number;
+		value: number | null | undefined;
 		min?: number;
 		max?: number;
 		unit?: string;
@@ -14,25 +14,33 @@
 		crit?: number;
 	}
 
-	const { label, value, min = 20, max = 100, unit = '°C', warn = 70, crit = 85 } = $props();
+	const { label, value, min = 20, max = 100, unit = '°C', warn = 70, crit = 85 }: Props = $props();
 
 	const RADIUS = 46;
 	const CIRCUMFERENCE = Math.PI * RADIUS; // half-circle arc length
 
-	let clamped = $derived(Math.min(max, Math.max(min, value)));
-	let ratio = $derived((clamped - min) / (max - min));
-	let strokeColor = $derived(
-		value >= crit
-			? 'var(--color-neon-magenta)'
-			: value >= warn
-				? 'var(--color-high-score-orange)'
-				: 'var(--color-neon-green)'
+	let numericValue = $derived(value ?? null);
+	let clamped = $derived(
+		numericValue === null ? min : Math.min(max, Math.max(min, numericValue))
 	);
-	let displayValue = $derived(Math.round(value * 10) / 10);
+	let ratio = $derived(numericValue === null ? 0 : (clamped - min) / (max - min));
+	let strokeColor = $derived(
+		numericValue === null
+			? 'rgba(255,255,255,0.16)'
+			: numericValue >= crit
+				? 'var(--color-neon-magenta)'
+				: numericValue >= warn
+					? 'var(--color-high-score-orange)'
+					: 'var(--color-neon-green)'
+	);
+	let displayValue = $derived(numericValue === null ? '--' : Math.round(numericValue * 10) / 10);
+	let ariaLabel = $derived(
+		numericValue === null ? `${label}: unavailable` : `${label}: ${displayValue}${unit}`
+	);
 </script>
 
 <div class="flex flex-col items-center gap-1 select-none">
-	<svg viewBox="0 0 120 66" class="h-16 w-28" role="img" aria-label="{label}: {displayValue}{unit}">
+	<svg viewBox="0 0 120 66" class="h-16 w-28" role="img" aria-label={ariaLabel}>
 		<!-- track -->
 		<path
 			d="M 14 60 A {RADIUS} {RADIUS} 0 0 1 106 60"
@@ -56,11 +64,15 @@
 			x="60"
 			y="52"
 			text-anchor="middle"
-			class="fill-white font-mono"
+			class="font-mono {numericValue === null ? 'fill-gray-500' : 'fill-white'}"
 			style="font-size: 17px; font-weight: bold;"
 		>
-			{displayValue}
-			<tspan style="font-size: 10px;">{unit}</tspan>
+			{#if numericValue === null}
+				--
+			{:else}
+				{displayValue}
+				<tspan style="font-size: 10px;">{unit}</tspan>
+			{/if}
 		</text>
 	</svg>
 	<div class="font-mono text-[10px] tracking-widest text-gray-400 uppercase">{label}</div>

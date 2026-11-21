@@ -61,9 +61,11 @@ export class VenueStore {
 	allNodes = $derived(Object.values(this.nodes));
 
 	avgCpuTemp = $derived.by(() => {
-		const nodes = this.onlineNodes;
-		if (nodes.length === 0) return null;
-		return nodes.reduce((sum, n) => sum + n.cpu_temp_c, 0) / nodes.length;
+		const temps = this.onlineNodes
+			.map((n) => n.cpu_temp_c)
+			.filter((t): t is number => t != null);
+		if (temps.length === 0) return null;
+		return temps.reduce((sum, t) => sum + t, 0) / temps.length;
 	});
 
 	avgFps = $derived.by(() => {

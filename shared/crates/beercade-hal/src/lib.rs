@@ -595,5 +595,156 @@ fn hwmon_temp(root: &Path, drivers: &[&str]) -> Option<f32> {
     })
 }
 
+/// Send a readiness or status notification to systemd's `NOTIFY_SOCKET`.
+///
+/// Returns `Ok(false)` when `NOTIFY_SOCKET` is unset or empty.
+pub fn sd_notify(state: &str) -> std::io::Result<bool> {
+    let Some(sock) = std::env::var_os("NOTIFY_SOCKET") else {
+        return Ok(false);
+    };
+    if sock.is_empty() {
+        return Ok(false);
+    }
+    let addr = sock.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "NOTIFY_SOCKET is not valid UTF-8",
+        )
+    })?;
+    sd_notify_to(addr, state)?;
+    Ok(true)
+}
+
+/// Notify systemd that this service has finished starting up (`READY=1`).
+pub fn sd_notify_ready() -> bool {
+    sd_notify("READY=1").unwrap_or(false)
+}
+
+/// Send a systemd `sd_notify` datagram directly to `socket_addr`.
+///
+/// Supports filesystem paths and Linux abstract sockets prefixed with `@`.
+pub fn sd_notify_to(socket_addr: &str, state: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixDatagram;
+
+        let sock = UnixDatagram::unbound()?;
+        #[cfg(target_os = "linux")]
+        if let Some(abstract_name) = socket_addr.strip_prefix('@') {
+            use std::os::linux::net::SocketAddrExt;
+            use std::os::unix::net::SocketAddr;
+
+            let addr = SocketAddr::from_abstract_name(abstract_name.as_bytes())?;
+            sock.send_to_addr(state.as_bytes(), &addr)?;
+            return Ok(());
+        }
+        sock.send_to(state.as_bytes(), socket_addr)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (socket_addr, state);
+        Ok(())
+    }
+}
+
+/// Discovered DRM KMS card under `/sys/class/drm`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrmCard {
+    pub index: u32,
+    pub dev_path: String,
+    pub driver: String,
+    pub connected: bool,
+}
+
+const FB_DRM_DRIVERS: &[&str] = &["simpledrm", "efifb", "vesafb", "simple-framebuffer"];
+
+fn read_drm_driver(card_dir: &Path) -> String {
+    let driver_link = card_dir.join("device/driver");
+    if let Ok(target) = fs::read_link(&driver_link) {
+        if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    if let Ok(canon) = fs::canonicalize(&driver_link) {
+        if let Some(name) = canon.file_name().and_then(|n| n.to_str()) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    if let Ok(uevent) = fs::read_to_string(card_dir.join("device/uevent")) {
+        for line in uevent.lines() {
+            if let Some(drv) = line.trim().strip_prefix("DRIVER=") {
+                let drv = drv.trim();
+                if !drv.is_empty() {
+                    return drv.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Probe `/sys/class/drm` for the best hardware KMS card.
+pub fn probe_drm_card() -> Option<DrmCard> {
+    probe_drm_card_at(Path::new("/sys/class/drm"))
+}
+
+/// Probe `sys_drm_root` for the best hardware KMS card: first connected
+/// non-framebuffer GPU card sorted by numeric card index, or else the first
+/// disconnected non-framebuffer GPU card.
+pub fn probe_drm_card_at(sys_drm_root: &Path) -> Option<DrmCard> {
+    let entries: Vec<PathBuf> = fs::read_dir(sys_drm_root)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+
+    let mut cards: Vec<(u32, PathBuf)> = entries
+        .iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            let idx_str = name.strip_prefix("card")?;
+            if idx_str.is_empty() || !idx_str.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let index: u32 = idx_str.parse().ok()?;
+            path.is_dir().then(|| (index, path.clone()))
+        })
+        .collect();
+    cards.sort_by_key(|(idx, _)| *idx);
+
+    let mut first_hardware: Option<DrmCard> = None;
+    for (index, card_dir) in cards {
+        let driver = read_drm_driver(&card_dir);
+        if FB_DRM_DRIVERS.contains(&driver.as_str()) {
+            continue;
+        }
+        let conn_prefix = format!("card{index}-");
+        let connected = entries.iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&conn_prefix))
+                && fs::read_to_string(p.join("status")).is_ok_and(|s| s.trim() == "connected")
+        });
+        let card = DrmCard {
+            index,
+            dev_path: format!("/dev/dri/card{index}"),
+            driver,
+            connected,
+        };
+        if connected {
+            return Some(card);
+        }
+        if first_hardware.is_none() {
+            first_hardware = Some(card);
+        }
+    }
+    first_hardware
+}
+
 #[cfg(test)]
 mod tests;

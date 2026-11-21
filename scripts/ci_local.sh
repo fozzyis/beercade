@@ -33,6 +33,9 @@ RUSTFLAGS="-D warnings" cargo check --workspace --locked --message-format=short
 echo "==== 2. Cargo test (workspace, --locked, all 6 crates incl. astro-shell) ===="
 cargo test --workspace --locked
 
+echo "==== 2.5. TypeScript wire proto drift check ===="
+cargo run -p beercade-shared --locked --bin gen_ts_proto -- --check
+
 echo "==== 3. Cargo release build (astro-daemon, astro-shell, astro-tune, boss-server) ===="
 cargo build --release --locked -p astro-daemon -p astro-shell -p astro-tune -p boss-server
 ls -lh \

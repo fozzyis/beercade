@@ -6,18 +6,77 @@ const HMAC_BLOCK_SIZE: usize = 64;
 
 /// Computes the SHA-256 digest of a byte slice, returning a lowercase hexadecimal string.
 pub fn compute_sha256(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    hasher.finalize_hex()
 }
 
 /// Verifies whether the SHA-256 digest of `data` matches `expected_hex` (case-insensitive).
 pub fn verify_sha256(data: &[u8], expected_hex: &str) -> bool {
-    let actual = compute_sha256(data);
-    crate::auth::constant_time_eq(
-        actual.to_ascii_lowercase().as_bytes(),
-        expected_hex.trim().to_ascii_lowercase().as_bytes(),
-    )
+    let mut hasher = Sha256Hasher::new();
+    hasher.update(data);
+    hasher.verify_hex(expected_hex)
+}
+
+/// Incremental SHA-256 hasher producing 64-character lowercase hexadecimal digests.
+#[derive(Debug, Clone)]
+pub struct Sha256Hasher {
+    inner: Sha256,
+}
+
+impl Sha256Hasher {
+    /// Creates a new SHA-256 hasher.
+    pub fn new() -> Self {
+        Self {
+            inner: Sha256::new(),
+        }
+    }
+
+    /// Feeds `data` into the digest state.
+    pub fn update(&mut self, data: &[u8]) {
+        self.inner.update(data);
+    }
+
+    /// Finalizes the digest and returns a 64-character lowercase hex string.
+    pub fn finalize_hex(self) -> String {
+        format!("{:x}", self.inner.finalize())
+    }
+
+    /// Finalizes the digest and checks it against `expected_hex` in constant time.
+    pub fn verify_hex(self, expected_hex: &str) -> bool {
+        let actual = self.finalize_hex();
+        verify_sha256_hex(&actual, expected_hex)
+    }
+}
+
+impl Default for Sha256Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Computes the SHA-256 digest of a reader by streaming in 64 KiB chunks.
+pub fn compute_reader_sha256<R: std::io::Read>(mut reader: R) -> std::io::Result<String> {
+    let mut hasher = Sha256Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize_hex())
+}
+
+/// Verifies two hex-encoded SHA-256 digests in constant time (trimmed, case-insensitive, length == 64).
+pub fn verify_sha256_hex(actual_hex: &str, expected_hex: &str) -> bool {
+    let actual_norm = actual_hex.trim().to_ascii_lowercase();
+    let expected_norm = expected_hex.trim().to_ascii_lowercase();
+    if actual_norm.len() != 64 || expected_norm.len() != 64 {
+        return false;
+    }
+    crate::auth::constant_time_eq(actual_norm.as_bytes(), expected_norm.as_bytes())
 }
 
 /// Computes RFC 2104 HMAC-SHA256 over `msg` using `key`.
@@ -87,6 +146,34 @@ mod tests {
         let hash = compute_sha256(data);
         assert!(verify_sha256(data, &hash));
         assert!(!verify_sha256(b"corrupt", &hash));
+        assert!(!verify_sha256(data, "short"));
+    }
+
+    #[test]
+    fn test_sha256_hasher_streaming_and_reader() {
+        // Multi-chunk payload spanning > 64 KiB to exercise multiple read iterations.
+        let mut payload = Vec::with_capacity(140 * 1024);
+        for i in 0..(140 * 1024) {
+            payload.push((i % 251) as u8);
+        }
+
+        let expected = compute_sha256(&payload);
+        assert_eq!(expected.len(), 64);
+
+        let mut hasher = Sha256Hasher::default();
+        for chunk in payload.chunks(4099) {
+            hasher.update(chunk);
+        }
+        assert!(hasher.clone().verify_hex(&expected.to_ascii_uppercase()));
+        assert!(!hasher.clone().verify_hex(&"0".repeat(64)));
+        assert_eq!(hasher.finalize_hex(), expected);
+
+        let reader_hex = compute_reader_sha256(std::io::Cursor::new(&payload)).unwrap();
+        assert_eq!(reader_hex, expected);
+
+        assert!(verify_sha256_hex(&expected, &format!("  {}  ", expected.to_ascii_uppercase())));
+        assert!(!verify_sha256_hex("deadbeef", "deadbeef"));
+        assert!(!verify_sha256_hex(&expected, &"a".repeat(63)));
     }
 
     #[test]

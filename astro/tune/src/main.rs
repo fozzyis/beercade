@@ -1,14 +1,13 @@
 //! astro-tune: boot-time latency tuning for A.S.T.R.O.
 //!
 //! 1. performance governor on every cpufreq policy
-//! 2. systemd AllowedCPUs= drop-ins splitting realtime / housekeeping CPUs
+//! 2. cgroup v2 cpuset partitioning splitting realtime / housekeeping CPUs
 //! 3. hold a PM QoS request (/dev/cpu_dma_latency = 0) for the process lifetime
 
 use beercade_hal::Platform;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 
 /// Parse a kernel cpu list ("0-7", "0,2-3") into CPU ids.
 fn parse_cpu_list(s: &str) -> Vec<usize> {
@@ -109,19 +108,27 @@ fn cpu_plan(platform: Platform, online: &[usize]) -> Option<Vec<(&'static str, S
     Some(plan)
 }
 
-/// `set-property --runtime` applies to running slices and scopes at once and
-/// is forgotten at reboot, where this service runs again.
-fn partition_cpus(platform: Platform, online: &[usize]) -> bool {
+/// Partition realtime and housekeeping CPUs directly via cgroup v2 sysfs,
+/// avoiding `systemctl set-property` subprocess forks at boot.
+fn partition_cpus(root: &Path, platform: Platform, online: &[usize]) -> bool {
     let Some(plan) = cpu_plan(platform, online) else {
         eprintln!("astro-tune: no realtime cpu set for this platform, leaving scheduling alone");
         return false;
     };
+    let cgroup = root.join("sys/fs/cgroup");
+    if let Err(e) = fs::write(cgroup.join("cgroup.subtree_control"), "+cpuset\n") {
+        eprintln!("astro-tune: cannot enable +cpuset on cgroup.subtree_control: {e}");
+    }
     for (unit, list) in plan {
-        let prop = format!("AllowedCPUs={list}");
-        match Command::new("systemctl").args(["set-property", "--runtime", unit, &prop]).status() {
-            Ok(s) if s.success() => eprintln!("astro-tune: {unit} {prop}"),
-            Ok(s) => eprintln!("astro-tune: set-property {unit} exited with {s}"),
-            Err(e) => eprintln!("astro-tune: set-property {unit} failed: {e}"),
+        let unit_dir = cgroup.join(unit);
+        if let Err(e) = fs::create_dir_all(&unit_dir) {
+            eprintln!("astro-tune: cannot create {}: {e}", unit_dir.display());
+            continue;
+        }
+        let cpuset_path = unit_dir.join("cpuset.cpus");
+        match fs::write(&cpuset_path, format!("{list}\n")) {
+            Ok(()) => eprintln!("astro-tune: {unit} cpuset.cpus = {list}"),
+            Err(e) => eprintln!("astro-tune: cannot write {}: {e}", cpuset_path.display()),
         }
     }
     true
@@ -151,15 +158,16 @@ fn run(root: &Path, platform: Platform) -> Option<File> {
     let online = online_cpus(root);
     eprintln!("astro-tune: {} online cpus, platform {:?}", online.len(), platform);
     set_cpufreq(root);
-    partition_cpus(platform, &online);
+    partition_cpus(root, platform, &online);
     hold_pm_qos(root)
 }
 
 fn main() {
     let _qos = run(Path::new("/"), Platform::detect());
+    let _ = beercade_hal::sd_notify_ready();
     // The PM QoS request lives as long as the fd stays open.
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
+        std::thread::park();
     }
 }
 
@@ -215,5 +223,26 @@ mod tests {
     #[test]
     fn no_plan_without_rt() {
         assert!(cpu_plan(Platform::X86_64, &[0, 1]).is_none());
+    }
+
+    #[test]
+    fn partition_cpus_writes_cgroup_v2_sysfs() {
+        let root = tmp("cgroup");
+        let _ = fs::remove_dir_all(&root);
+        let cgroup = root.join("sys/fs/cgroup");
+        fs::create_dir_all(&cgroup).unwrap();
+        let online: Vec<usize> = (0..8).collect();
+        assert!(partition_cpus(&root, Platform::X86_64, &online));
+        assert_eq!(
+            fs::read_to_string(cgroup.join("astro-rt.slice/cpuset.cpus")).unwrap(),
+            "2-7\n"
+        );
+        for unit in ["system.slice", "user.slice", "init.scope"] {
+            assert_eq!(
+                fs::read_to_string(cgroup.join(unit).join("cpuset.cpus")).unwrap(),
+                "0-1\n"
+            );
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 }

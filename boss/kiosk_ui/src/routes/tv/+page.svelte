@@ -441,7 +441,7 @@
 								</div>
 								<div class="cab-game">{romDisplayTitle(n.active_rom)}</div>
 								<div class="cab-meta">
-									{n.hardware} · {n.fps.toFixed(1)} FPS · CPU {n.cpu_temp_c.toFixed(0)}°C
+									{n.hardware} · {n.fps.toFixed(1)} FPS · CPU {n.cpu_temp_c != null ? `${n.cpu_temp_c.toFixed(0)}°C` : '--'}
 								</div>
 								{#if activePass}
 									<div class="cab-pass">

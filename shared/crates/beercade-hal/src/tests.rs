@@ -314,3 +314,68 @@ label beercade
         "label beercade\n  append root=PARTLABEL=ROOT_B rootwait\n"
     );
 }
+
+#[test]
+fn test_probe_drm_card_skips_simpledrm_and_prefers_connected() {
+    let root = FakeRoot::new();
+    let drm = root.0.join("sys/class/drm");
+    root.file("sys/class/drm/card0/device/uevent", "DRIVER=simpledrm\n")
+        .file("sys/class/drm/card0-Unknown-1/status", "connected\n")
+        .file("sys/class/drm/card1/device/uevent", "DRIVER=amdgpu\n")
+        .file("sys/class/drm/card1-HDMI-A-1/status", "disconnected\n")
+        .file("sys/class/drm/card2/device/uevent", "DRIVER=i915\n")
+        .file("sys/class/drm/card2-DP-1/status", "connected\n");
+
+    let card = probe_drm_card_at(&drm).unwrap();
+    assert_eq!(
+        card,
+        DrmCard {
+            index: 2,
+            dev_path: "/dev/dri/card2".to_string(),
+            driver: "i915".to_string(),
+            connected: true,
+        }
+    );
+}
+
+#[test]
+fn test_probe_drm_card_falls_back_to_disconnected_hardware_card() {
+    let root = FakeRoot::new();
+    let drm = root.0.join("sys/class/drm");
+    root.file("sys/class/drm/card0/device/uevent", "DRIVER=efifb\n")
+        .file("sys/class/drm/card1/device/uevent", "DRIVER=vc4\n")
+        .file("sys/class/drm/card1-HDMI-A-1/status", "disconnected\n");
+
+    let card = probe_drm_card_at(&drm).unwrap();
+    assert_eq!(
+        card,
+        DrmCard {
+            index: 1,
+            dev_path: "/dev/dri/card1".to_string(),
+            driver: "vc4".to_string(),
+            connected: false,
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sd_notify_to_unix_datagram() {
+    use std::os::unix::net::UnixDatagram;
+
+    let root = FakeRoot::new();
+    let sock_path = root.0.join("notify.sock");
+    let server = UnixDatagram::bind(&sock_path).unwrap();
+
+    sd_notify_to(sock_path.to_str().unwrap(), "READY=1").unwrap();
+
+    let mut buf = [0u8; 64];
+    let n = server.recv(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"READY=1");
+}
+
+#[test]
+fn test_sd_notify_unset_returns_false() {
+    std::env::remove_var("NOTIFY_SOCKET");
+    assert!(!sd_notify("READY=1").unwrap());
+}
