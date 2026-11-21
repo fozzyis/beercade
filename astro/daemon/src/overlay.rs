@@ -15,31 +15,22 @@
 //! RetroArch at start-up.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
+pub use beercade_shared::theme::DEFAULT_THEME;
+use beercade_shared::theme::{accent_rgb, is_known_theme};
 use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
 
 /// RetroArch's default network command port.
 pub const RA_CMD_PORT: u16 = 55355;
 /// Length of the CONTINUE? window after a session runs out.
 pub const CONTINUE_SECS: u32 = 10;
-pub const DEFAULT_THEME: &str = "taproom";
-
-/// OSD colour per venue theme: each theme's accent, except Big Sky, whose
-/// navy accent is unreadable over a game, so it uses its sky blue.
-pub fn theme_rgb(theme: &str) -> (u8, u8, u8) {
-    match theme {
-        "vector" => (0x5c, 0xf2, 0xff),
-        "bigsky" => (0x4f, 0xa3, 0xff),
-        "pinball" => (0xff, 0xc9, 0x4a),
-        "classic" => (0x00, 0xf0, 0xff),
-        _ => (0xf2, 0xa9, 0x00),
-    }
-}
 
 /// RetroArch appendconfig enabling the command port and theming the OSD.
 pub fn retroarch_cfg(theme: &str) -> String {
-    let (r, g, b) = theme_rgb(theme);
+    let (r, g, b) = accent_rgb(theme).as_tuple();
     let f = |c: u8| format!("{:.3}", c as f32 / 255.0);
     format!(
         "network_cmd_enable = \"true\"\n\
@@ -84,8 +75,7 @@ pub async fn fetch_theme(client: &reqwest::Client, boss_url: &str) -> Option<Str
     let url = format!("{}/api/v1/ui/theme", boss_url.trim_end_matches('/'));
     let body: serde_json::Value = client.get(url).send().await.ok()?.json().await.ok()?;
     let theme = body.get("theme")?.as_str()?.to_string();
-    let known = ["taproom", "vector", "bigsky", "pinball", "classic"];
-    known.contains(&theme.as_str()).then_some(theme)
+    is_known_theme(&theme).then_some(theme)
 }
 
 pub fn fmt_clock(secs: u32) -> String {
@@ -300,23 +290,54 @@ impl PauseMenu {
     }
 }
 
-/// Fire-and-forget sender for RetroArch network commands. Every call is a
-/// no-op when no game is running (nothing listens on the port).
+/// Fire-and-forget sender for RetroArch network commands. Holds a single
+/// connected UDP socket (lazy-reconnected on write error) and daemon-owned
+/// pause state so pause toggles need zero `GET_STATUS` polls.
 #[derive(Clone, Debug)]
 pub struct RetroArch {
     port: u16,
+    sock: Arc<Mutex<Option<UdpSocket>>>,
+    paused: Arc<AtomicBool>,
 }
 
 impl Default for RetroArch {
     fn default() -> Self {
-        Self { port: RA_CMD_PORT }
+        Self::new(RA_CMD_PORT)
     }
 }
 
 impl RetroArch {
-    async fn send(&self, cmd: &str) -> std::io::Result<()> {
+    pub fn new(port: u16) -> Self {
+        Self {
+            port,
+            sock: Arc::new(Mutex::new(None)),
+            paused: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn connect_socket(port: u16) -> std::io::Result<UdpSocket> {
         let sock = UdpSocket::bind("127.0.0.1:0").await?;
-        sock.send_to(cmd.as_bytes(), ("127.0.0.1", self.port)).await?;
+        sock.connect(("127.0.0.1", port)).await?;
+        Ok(sock)
+    }
+
+    async fn send(&self, cmd: &str) -> std::io::Result<()> {
+        let mut guard = self.sock.lock().await;
+        if guard.is_none() {
+            *guard = Some(Self::connect_socket(self.port).await?);
+        }
+        let res = match guard.as_ref() {
+            Some(sock) => sock.send(cmd.as_bytes()).await,
+            None => unreachable!(),
+        };
+        if res.is_ok() {
+            return Ok(());
+        }
+        // Reconnect once in case RetroArch restarted or ICMP port unreachable cleared the socket.
+        *guard = None;
+        let fresh = Self::connect_socket(self.port).await?;
+        fresh.send(cmd.as_bytes()).await?;
+        *guard = Some(fresh);
         Ok(())
     }
 
@@ -326,30 +347,22 @@ impl RetroArch {
         let _ = self.send(&format!("SHOW_MSG {msg}")).await;
     }
 
-    /// `Some(true)` when paused, `None` when RetroArch did not answer.
-    pub async fn is_paused(&self) -> Option<bool> {
-        let sock = UdpSocket::bind("127.0.0.1:0").await.ok()?;
-        sock.send_to(b"GET_STATUS", ("127.0.0.1", self.port)).await.ok()?;
-        let mut buf = [0u8; 512];
-        let n = tokio::time::timeout(Duration::from_millis(250), sock.recv(&mut buf))
-            .await
-            .ok()?
-            .ok()?;
-        let reply = String::from_utf8_lossy(&buf[..n]);
-        if reply.contains("PAUSED") {
-            Some(true)
-        } else if reply.contains("PLAYING") {
-            Some(false)
-        } else {
-            None
+    /// Reset daemon-tracked pause state (call on game launch and exit).
+    pub fn reset_pause_state(&self) {
+        self.paused.store(false, Ordering::Release);
+    }
+
+    /// Transition RetroArch's pause state using daemon-tracked state (zero UDP poll).
+    pub async fn set_paused(&self, paused: bool) {
+        if self.paused.swap(paused, Ordering::AcqRel) != paused {
+            let _ = self.send("PAUSE_TOGGLE").await;
         }
     }
 
-    /// RetroArch only has a toggle, so check the state first.
-    pub async fn set_paused(&self, paused: bool) {
-        if self.is_paused().await == Some(!paused) {
-            let _ = self.send("PAUSE_TOGGLE").await;
-        }
+    /// Ask RetroArch to quit cleanly (flushing SRAM) and reset pause tracking.
+    pub async fn quit(&self) {
+        self.reset_pause_state();
+        let _ = self.send("QUIT").await;
     }
 }
 
@@ -459,10 +472,40 @@ mod tests {
     #[tokio::test]
     async fn show_msg_reaches_port() {
         let rx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let ra = RetroArch { port: rx.local_addr().unwrap().port() };
+        let ra = RetroArch::new(rx.local_addr().unwrap().port());
         ra.show("CREDIT 03\nnext").await;
         let mut buf = [0u8; 128];
         let n = rx.recv(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"SHOW_MSG CREDIT 03 next");
+    }
+
+    #[tokio::test]
+    async fn set_paused_uses_local_state_without_poll() {
+        let rx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ra = RetroArch::new(rx.local_addr().unwrap().port());
+        let mut buf = [0u8; 64];
+
+        ra.set_paused(true).await;
+        let n = rx.recv(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"PAUSE_TOGGLE");
+
+        // Idempotent second call must not send another toggle.
+        ra.set_paused(true).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), rx.recv(&mut buf))
+                .await
+                .is_err()
+        );
+
+        ra.set_paused(false).await;
+        let n = rx.recv(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"PAUSE_TOGGLE");
+
+        ra.set_paused(true).await;
+        let _ = rx.recv(&mut buf).await.unwrap();
+        ra.reset_pause_state();
+        ra.set_paused(true).await;
+        let n = rx.recv(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"PAUSE_TOGGLE");
     }
 }

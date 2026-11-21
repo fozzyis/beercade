@@ -1,9 +1,21 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { fetchPlugins, fetchVenueTelemetry, subscribeBossEvents } from '$lib/bossApi';
-	import type { HighScoreEntry, NodeTelemetry, PluginDescriptor } from '$lib/types/telemetry';
+	import type {
+		CabinetAlertEvent,
+		HighScoreEntry,
+		NodeTelemetry,
+		PluginDescriptor
+	} from '$lib/types/telemetry';
 
 	type SlideId = 'high_scores' | 'tournament_bracket' | 'live_cabinets' | 'taproom_promo';
+
+	interface GraceWindowEntry {
+		node_id: string;
+		session_code: string;
+		grace_until_epoch_ms: number;
+		at_epoch_ms: number;
+	}
 
 	let zone = $state<'main' | 'bar' | 'stage'>('main');
 	let venueName = $state('Beercade Redfern (The BK)');
@@ -13,6 +25,13 @@
 	let autoRotate = $state(true);
 	let slideProgressPct = $state(0);
 	let clockTime = $state('');
+	let nowMs = $state<number>(Date.now());
+	let graceWindows = $state<GraceWindowEntry[]>([]);
+	let stagingBanner = $state<{ node_id: string; text: string } | null>(null);
+
+	const activeGraceWindows = $derived(
+		graceWindows.filter((g) => g.grace_until_epoch_ms > nowMs)
+	);
 
 	// Live fanfare interrupt overlay (triggered by SSE high score or operator fanfare)
 	let fanfare = $state<{
@@ -162,7 +181,14 @@
 	}
 
 	function remainingMinutes(expiresAtMs: number): number {
-		return Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 60_000));
+		return Math.max(0, Math.ceil((expiresAtMs - nowMs) / 60_000));
+	}
+
+	function formatGraceCountdown(graceUntilMs: number): string {
+		const secs = Math.max(0, Math.ceil((graceUntilMs - nowMs) / 1000));
+		const mins = Math.floor(secs / 60);
+		const rem = secs % 60;
+		return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
 	}
 
 	function romDisplayTitle(rom: string): string {
@@ -195,7 +221,8 @@
 
 		const tickMs = 200;
 		const rotateTimer = setInterval(() => {
-			clockTime = new Date().toLocaleTimeString([], {
+			nowMs = Date.now();
+			clockTime = new Date(nowMs).toLocaleTimeString([], {
 				hour: '2-digit',
 				minute: '2-digit',
 				second: '2-digit'
@@ -212,6 +239,38 @@
 			if (channel === 'venue' && Array.isArray(data?.nodes)) {
 				nodes = data.nodes;
 				if (data.venue) venueName = data.venue;
+			} else if (channel === 'alerts' && data?.kind === 'cabinet_event') {
+				const alert = data as CabinetAlertEvent;
+				const ev = alert.event;
+				if (ev.type === 'session_expired') {
+					const until = alert.grace_until_epoch_ms ?? Date.now() + 120_000;
+					const code = (alert.session_code || ev.session_id || '').toUpperCase();
+					if (code) {
+						graceWindows = [
+							{
+								node_id: alert.node_id,
+								session_code: code,
+								grace_until_epoch_ms: until,
+								at_epoch_ms: alert.at_epoch_ms ?? Date.now()
+							},
+							...graceWindows.filter((g) => g.node_id !== alert.node_id)
+						];
+					}
+				} else if (ev.type === 'session_ended') {
+					const code = (alert.session_code || '').toUpperCase();
+					graceWindows = graceWindows.filter(
+						(g) => g.node_id !== alert.node_id && (!code || g.session_code !== code)
+					);
+				} else if (ev.type === 'session_staged') {
+					graceWindows = graceWindows.filter((g) => g.node_id !== alert.node_id);
+					stagingBanner = {
+						node_id: alert.node_id,
+						text: `${alert.node_id}: STAGED ${ev.ready_game_ids.length} GAME(S) — READY TO PLAY`
+					};
+					setTimeout(() => {
+						if (stagingBanner?.node_id === alert.node_id) stagingBanner = null;
+					}, 6000);
+				}
 			} else if (channel === 'alerts' && data?.score && data?.initials) {
 				const entry: HighScoreEntry = data;
 				liveScores = [entry, ...liveScores].sort((a, b) => b.score - a.score).slice(0, 10);
@@ -309,6 +368,26 @@
 		<!-- Slide Progress Bar -->
 		<div class="progress"><div class="progress-fill" style="width: {slideProgressPct}%"></div></div>
 	</header>
+
+	<!-- Live Grace Window Countdown & Top-Up Offer Banner -->
+	{#if activeGraceWindows.length > 0 || stagingBanner}
+		<div class="tv-grace-strip">
+			{#each activeGraceWindows as gw}
+				<div class="tv-grace-banner">
+					<div class="tv-grace-left">
+						<span class="tv-grace-tag">⏱️ GRACE WINDOW · {gw.node_id}</span>
+						<span class="tv-grace-offer">TOP UP WITH CODE <strong>{gw.session_code}</strong> AT KIOSK OR PHONE</span>
+					</div>
+					<div class="tv-grace-timer">
+						{formatGraceCountdown(gw.grace_until_epoch_ms)} LEFT
+					</div>
+				</div>
+			{/each}
+			{#if stagingBanner}
+				<div class="tv-staging-pill">✓ {stagingBanner.text}</div>
+			{/if}
+		</div>
+	{/if}
 
 	<!-- Main Attractor Slide Stage -->
 	<main class="stage">
@@ -428,10 +507,15 @@
 							{@const activePass = activeTimedSessions.find(
 								(s) => s.node_id === n.node_id && s.status === 'active'
 							)}
+							{@const cabGrace = activeGraceWindows.find((g) => g.node_id === n.node_id)}
 							<div class="card cab">
 								<div class="cab-head">
 									<span class="cab-id">{n.node_id}</span>
-									{#if activePass}
+									{#if cabGrace}
+										<span class="status-chip warn">
+											GRACE {formatGraceCountdown(cabGrace.grace_until_epoch_ms)} · {cabGrace.session_code}
+										</span>
+									{:else if activePass}
 										<span class="status-chip warn">TIMED PASS: {remainingMinutes(activePass.expires_at_ms)}M LEFT</span>
 									{:else if n.credits.credits_available > 0}
 										<span class="status-chip accent">IN PLAY ({n.credits.credits_available} CREDITS)</span>
@@ -1407,5 +1491,85 @@
 	:global([data-theme='taproom']) .ticker {
 		border-top: 4px solid var(--accent);
 		font-size: 1.15rem;
+	}
+
+	/* ---- Wave 3C: Live Grace Window Countdown & Top-Up Offer ---- */
+	.tv-grace-strip {
+		position: relative;
+		z-index: 12;
+		width: 100%;
+		max-width: 1600px;
+		margin: 1rem auto 0;
+		padding: 0 2rem;
+		box-sizing: border-box;
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+	}
+	.tv-grace-banner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		flex-wrap: wrap;
+		padding: 0.9rem 1.4rem;
+		border-radius: 1rem;
+		border: 2px solid var(--warn);
+		background: rgba(var(--warn-rgb), 0.2);
+		box-shadow: 0 0 24px rgba(var(--warn-rgb), 0.25);
+	}
+	.tv-grace-left {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+	.tv-grace-tag {
+		padding: 0.25rem 0.7rem;
+		border-radius: 999px;
+		background: var(--warn);
+		color: var(--on-accent);
+		font-family: var(--font-data);
+		font-size: 0.8rem;
+		font-weight: 900;
+		letter-spacing: 0.08em;
+	}
+	.tv-grace-offer {
+		font-family: var(--font-display);
+		font-size: 1.25rem;
+		font-weight: 900;
+		color: var(--text-strong);
+		letter-spacing: 0.04em;
+	}
+	.tv-grace-offer strong {
+		color: var(--warn);
+		font-family: var(--font-data);
+		font-size: 1.4rem;
+		letter-spacing: 0.1em;
+	}
+	.tv-grace-timer {
+		padding: 0.4rem 0.9rem;
+		border-radius: 0.75rem;
+		background: var(--inset);
+		border: 1px solid var(--warn);
+		color: var(--warn);
+		font-family: var(--font-data);
+		font-size: 1.25rem;
+		font-weight: 900;
+	}
+	.tv-staging-pill {
+		align-self: flex-start;
+		padding: 0.45rem 1rem;
+		border-radius: 999px;
+		border: 1px solid var(--good);
+		background: rgba(var(--good-rgb), 0.16);
+		color: var(--good);
+		font-family: var(--font-data);
+		font-size: 0.85rem;
+		font-weight: 800;
+	}
+	:global([data-theme='taproom']) .tv-grace-banner {
+		border-radius: 0;
+		background: var(--surface-2);
 	}
 </style>

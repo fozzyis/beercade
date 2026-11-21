@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::models::{
-    CabinetCommand, CommandRecord, ErrorEvent, HighScoreEntry, NodeTelemetry, TokenTransaction,
-    now_epoch_ms,
+    CabinetCommand, CommandRecord, ErrorEvent, GameRef, HighScoreEntry, NodeTelemetry,
+    TokenTransaction, now_epoch_ms,
 };
-use crate::state::{EdgeItem, SharedState, SseChannel};
+use crate::state::{ActiveNodeSession, EdgeItem, MAX_SESSION_GAMES, SharedState, SseChannel};
 
 // ---------------------------------------------------------------------------
 // Core Plugin Manifest & Event Types
@@ -208,6 +208,131 @@ struct PosState {
     total_revenue_cents: u64,
     total_credits_sold: u64,
     transactions_count: u64,
+}
+
+async fn resolve_session_games(
+    app_state: &SharedState,
+    payload: &Value,
+) -> Result<Vec<GameRef>, String> {
+    let cat = app_state.catalogue.read().await;
+
+    if let Some(raw_ids) = payload.get("game_ids").filter(|v| !v.is_null()) {
+        let ids: Vec<String> = serde_json::from_value(raw_ids.clone())
+            .map_err(|e| format!("invalid 'game_ids': {e}"))?;
+        if !ids.is_empty() {
+            if ids.len() > MAX_SESSION_GAMES {
+                return Err(format!("too many games selected (max {MAX_SESSION_GAMES})"));
+            }
+            let mut resolved = Vec::with_capacity(ids.len());
+            for id in ids {
+                let entry = cat
+                    .get(id.trim())
+                    .filter(|e| e.enabled)
+                    .ok_or_else(|| format!("game '{}' is not enabled in catalogue", id))?;
+                resolved.push(entry.game.clone());
+            }
+            return Ok(resolved);
+        }
+    }
+
+    if let Some(raw_games) = payload.get("games").filter(|v| !v.is_null()) {
+        let games: Vec<GameRef> = serde_json::from_value(raw_games.clone())
+            .map_err(|e| format!("invalid 'games': {e}"))?;
+        if !games.is_empty() {
+            if games.len() > MAX_SESSION_GAMES {
+                return Err(format!("too many games selected (max {MAX_SESSION_GAMES})"));
+            }
+            let mut resolved = Vec::with_capacity(games.len());
+            for g in games {
+                if let Some(entry) = cat.get(&g.game_id) {
+                    if !entry.enabled {
+                        return Err(format!("game '{}' is disabled in catalogue", g.game_id));
+                    }
+                    resolved.push(entry.game.clone());
+                } else if !g.game_id.trim().is_empty() {
+                    resolved.push(g);
+                } else {
+                    return Err("game entry missing 'game_id'".to_string());
+                }
+            }
+            return Ok(resolved);
+        }
+    }
+
+    Ok(cat.list_enabled().into_iter().take(4).collect())
+}
+
+async fn start_managed_node_session(
+    app_state: &SharedState,
+    node_id: &str,
+    session_id: String,
+    duration_secs: u32,
+    payload: &Value,
+) -> Result<(String, u32, Vec<GameRef>, ActiveNodeSession, CommandRecord), String> {
+    let games = resolve_session_games(app_state, payload).await?;
+    let session_code = match payload
+        .get("session_code")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(code) => code.to_ascii_uppercase(),
+        None => app_state.generate_unique_session_code().await,
+    };
+    let topup_grace_secs = payload
+        .get("topup_grace_secs")
+        .and_then(Value::as_u64)
+        .map(|v| v.min(3600) as u32)
+        .unwrap_or(90);
+
+    let now = now_epoch_ms();
+    let active_session = ActiveNodeSession {
+        session_id: session_id.clone(),
+        session_code: session_code.clone(),
+        duration_secs,
+        topup_grace_secs,
+        games: games.clone(),
+        started_at_epoch_ms: now,
+        expires_at_epoch_ms: now.saturating_add((duration_secs as u64) * 1_000),
+        grace_until_epoch_ms: None,
+        in_grace: false,
+    };
+    app_state
+        .set_node_session(node_id, active_session.clone())
+        .await;
+
+    let start_cmd = app_state
+        .enqueue_command(
+            node_id,
+            CabinetCommand::StartSession {
+                session_id: session_id.clone(),
+                duration_secs,
+                session_code: session_code.clone(),
+                topup_grace_secs,
+                games: games.clone(),
+            },
+        )
+        .await;
+
+    app_state.publish(
+        SseChannel::Ui,
+        &json!({
+            "kind": "session_started",
+            "node_id": node_id,
+            "session_id": session_id,
+            "session_code": session_code,
+            "at_epoch_ms": now,
+        }),
+    );
+    app_state.publish_venue_now().await;
+
+    Ok((
+        session_code,
+        topup_grace_secs,
+        games,
+        active_session,
+        start_cmd,
+    ))
 }
 
 pub struct PosPaymentsPlugin {
@@ -534,19 +659,15 @@ impl BossPlugin for PosPaymentsPlugin {
                 let expires_at_ms = now + (duration_mins as u64) * 60 * 1000;
                 let session_id = format!("sess_{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-                // Enqueue session countdown to put the station in Managed mode
-                app_state
-                    .enqueue_command(
+                let (session_code, topup_grace_secs, games, active_session, _start_cmd) =
+                    start_managed_node_session(
+                        app_state,
                         &node_id,
-                        CabinetCommand::StartSession {
-                            session_id: session_id.clone(),
-                            duration_secs,
-                            session_code: String::new(),
-                            topup_grace_secs: 0,
-                            games: Vec::new(),
-                        },
+                        session_id.clone(),
+                        duration_secs,
+                        &payload,
                     )
-                    .await;
+                    .await?;
 
                 // Dispatch credits to the A.S.T.R.O. cabinet node immediately
                 let cmd_record = app_state
@@ -554,7 +675,7 @@ impl BossPlugin for PosPaymentsPlugin {
                     .await;
 
                 let timed_session = ActiveTimedSession {
-                    session_id,
+                    session_id: session_id.clone(),
                     pass_code: pass_code.clone(),
                     patron_name: patron_name.clone(),
                     node_id: node_id.clone(),
@@ -601,9 +722,19 @@ impl BossPlugin for PosPaymentsPlugin {
 
                 Ok(json!({
                     "ok": true,
+                    "status": "active",
+                    "node_id": node_id,
+                    "session_id": session_id,
+                    "session_code": session_code,
+                    "duration_secs": duration_secs,
+                    "topup_grace_secs": topup_grace_secs,
+                    "games": games,
+                    "pass_code": pass_code,
+                    "credits_added": credits,
+                    "command_id": cmd_record.id,
+                    "state": active_session,
                     "timed_session": timed_session,
                     "ledger_entry": entry,
-                    "command_id": cmd_record.id,
                 }))
             }
             "configure_square" => {
@@ -735,25 +866,21 @@ impl BossPlugin for PosPaymentsPlugin {
                 let duration_secs = duration_mins * 60;
                 let session_id = format!("sess_{}", &uuid::Uuid::new_v4().to_string()[..6]);
 
-                // Enqueue session countdown to put the station in Managed mode
-                app_state
-                    .enqueue_command(
+                let (session_code, topup_grace_secs, games, active_session, start_cmd) =
+                    start_managed_node_session(
+                        app_state,
                         &node_id,
-                        CabinetCommand::StartSession {
-                            session_id: session_id.clone(),
-                            duration_secs,
-                            session_code: String::new(),
-                            topup_grace_secs: 0,
-                            games: Vec::new(),
-                        },
+                        session_id.clone(),
+                        duration_secs,
+                        &payload,
                     )
-                    .await;
+                    .await?;
 
                 let mut st = self.inner.write().await;
                 st.total_revenue_cents += amount_cents as u64;
                 st.transactions_count += 1;
                 let timed = ActiveTimedSession {
-                    session_id,
+                    session_id: session_id.clone(),
                     pass_code: booking_ref.clone(),
                     patron_name: patron_name.clone(),
                     node_id: node_id.clone(),
@@ -784,8 +911,18 @@ impl BossPlugin for PosPaymentsPlugin {
 
                 Ok(json!({
                     "ok": true,
+                    "status": "active",
                     "booking_ref": booking_ref,
                     "node_id": node_id,
+                    "session_id": session_id,
+                    "session_code": session_code,
+                    "duration_secs": duration_secs,
+                    "topup_grace_secs": topup_grace_secs,
+                    "games": games,
+                    "pass_code": booking_ref,
+                    "credits_added": 0,
+                    "command_id": start_cmd.id,
+                    "state": active_session,
                     "duration_mins": duration_mins,
                     "amount_cents": amount_cents,
                 }))

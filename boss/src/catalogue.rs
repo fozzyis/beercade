@@ -5,13 +5,54 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
+use beercade_shared::crypto::compute_reader_sha256;
 use beercade_shared::models::GameRef;
+
+/// Supported ROM file extensions (lowercase, without leading dot).
+const SUPPORTED_ROM_EXTENSIONS: &[&str] = &[
+    "zip", "7z", "chd", "iso", "bin", "cue", "sfc", "smc", "md", "gen",
+    "gba", "n64", "z64", "v64", "nes", "pce", "pbp",
+];
+
+/// Returns the configured ROM library root (`BOSS_ROMS_DIR` or `/data/beercade/roms`).
+pub fn roms_dir() -> PathBuf {
+    std::env::var("BOSS_ROMS_DIR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/data/beercade/roms"))
+}
+
+/// Returns the configured persistent catalogue JSON path (`BOSS_CATALOGUE_FILE` or `/data/beercade/catalogue.json`).
+pub fn catalogue_file_path() -> PathBuf {
+    std::env::var("BOSS_CATALOGUE_FILE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/data/beercade/catalogue.json"))
+}
+
+fn active_catalogue_file_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var("BOSS_CATALOGUE_FILE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(PathBuf::from(p));
+    }
+    if cfg!(test) {
+        None
+    } else {
+        Some(catalogue_file_path())
+    }
+}
 
 /// Catalogue entry pairing game metadata with its enabled/disabled status.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -22,17 +63,142 @@ pub struct CatalogEntry {
 
 /// Compute lower-case hex SHA-256 for a file on disk without loading it into RAM.
 pub fn compute_sha256<P: AsRef<Path>>(path: P) -> io::Result<String> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
+    let file = File::open(path)?;
+    compute_reader_sha256(file)
+}
+
+/// Map a system directory name (and optional extension fallback) to its default libretro core.
+pub fn default_core_for_system(system: &str, ext: Option<&str>) -> &'static str {
+    match system.trim().to_ascii_lowercase().as_str() {
+        "snes" | "sfc" => "snes9x",
+        "arcade" | "fbneo" | "neogeo" | "cps1" | "cps2" | "cps3" => "fbneo",
+        "mame" => "mame2003_plus",
+        "naomi" | "dreamcast" | "dc" | "atomiswave" => "flycast",
+        "megadrive" | "genesis" | "md" | "gen" | "sms" | "gamegear" => "genesis_plus_gx",
+        "gba" => "mgba",
+        "gb" | "gbc" => "gambatte",
+        "nes" | "famicom" => "nestopia",
+        "n64" => "mupen64plus_next",
+        "psx" | "ps1" | "playstation" => "pcsx_rearmed",
+        "psp" => "ppsspp",
+        "pce" | "pcengine" | "tg16" => "mednafen_pce_fast",
+        "pc" | "dos" => "dosbox_pure",
+        _ => match ext.map(|e| e.to_ascii_lowercase()).as_deref() {
+            Some("sfc" | "smc") => "snes9x",
+            Some("md" | "gen") => "genesis_plus_gx",
+            Some("gba") => "mgba",
+            Some("n64" | "z64" | "v64") => "mupen64plus_next",
+            Some("nes") => "nestopia",
+            Some("pce") => "mednafen_pce_fast",
+            Some("pbp") => "ppsspp",
+            Some("iso" | "bin" | "cue" | "chd") => "pcsx_rearmed",
+            _ => "fbneo",
+        },
     }
-    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn infer_system_from_ext(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "sfc" | "smc" => "snes",
+        "md" | "gen" => "megadrive",
+        "gba" => "gba",
+        "n64" | "z64" | "v64" => "n64",
+        "nes" => "nes",
+        "pce" => "pce",
+        "pbp" => "psp",
+        "iso" | "bin" | "cue" | "chd" => "psx",
+        _ => "arcade",
+    }
+}
+
+fn is_supported_rom_ext(ext: &str) -> bool {
+    let lower = ext.to_ascii_lowercase();
+    SUPPORTED_ROM_EXTENSIONS.contains(&lower.as_str())
+}
+
+fn build_game_ref_from_rom(path: &Path, system: &str, core: &str) -> io::Result<GameRef> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"))?
+        .to_string();
+    let metadata = std::fs::metadata(path)?;
+    let size_bytes = metadata.len();
+    let sha256 = compute_sha256(path)?;
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&file_name);
+    let game_id = stem.to_lowercase().replace(' ', "_");
+    let title = stem.to_string();
+
+    Ok(GameRef {
+        game_id,
+        title,
+        system: system.to_string(),
+        core: core.to_string(),
+        file_name,
+        size_bytes,
+        sha256,
+        artwork_url: None,
+    })
+}
+
+/// Walk `<dir>/<system>/*` (and any top-level ROM files in `<dir>`) and hash supported ROMs.
+pub fn collect_roms_from_dir(dir: &Path) -> io::Result<Vec<GameRef>> {
+    if !dir.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("ROM directory does not exist: {}", dir.display()),
+        ));
+    }
+
+    let mut games = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let system = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("arcade")
+                .to_ascii_lowercase();
+            let Ok(sub_rd) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for sub_entry in sub_rd.flatten() {
+                let rom_path = sub_entry.path();
+                if !rom_path.is_file() {
+                    continue;
+                }
+                let Some(ext) = rom_path.extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                if !is_supported_rom_ext(ext) {
+                    continue;
+                }
+                let core = default_core_for_system(&system, Some(ext));
+                if let Ok(game) = build_game_ref_from_rom(&rom_path, &system, core) {
+                    games.push(game);
+                }
+            }
+        } else if path.is_file() {
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if !is_supported_rom_ext(ext) {
+                continue;
+            }
+            let system = infer_system_from_ext(ext);
+            let core = default_core_for_system(system, Some(ext));
+            if let Ok(game) = build_game_ref_from_rom(&path, system, core) {
+                games.push(game);
+            }
+        }
+    }
+
+    games.sort_by(|a, b| a.system.cmp(&b.system).then_with(|| a.title.cmp(&b.title)));
+    Ok(games)
 }
 
 /// In-memory game catalogue store with seed catalog and attract mode selection.
@@ -188,6 +354,16 @@ impl GameCatalogue {
         list
     }
 
+    /// Total number of games in the catalogue.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Number of enabled games in the catalogue.
+    pub fn enabled_count(&self) -> usize {
+        self.entries.values().filter(|e| e.enabled).count()
+    }
+
     /// Enable or disable a game. Returns true if the game was found.
     pub fn set_enabled(&mut self, game_id: &str, enabled: bool) -> bool {
         if let Some(entry) = self.entries.get_mut(game_id) {
@@ -198,38 +374,123 @@ impl GameCatalogue {
         }
     }
 
+    /// Atomically persist the catalogue to disk (`tmp` -> `sync_all` -> `rename`).
+    pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let entries = self.list_all();
+        let data = serde_json::to_vec_pretty(&entries)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        let tmp_name = format!(
+            ".{}.tmp.{}",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("catalogue.json"),
+            uuid::Uuid::new_v4()
+        );
+        let tmp_path = path.with_file_name(tmp_name);
+        {
+            let mut f = File::create(&tmp_path)?;
+            f.write_all(&data)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
+    /// Persist to `BOSS_CATALOGUE_FILE` (or `/data/beercade/catalogue.json`).
+    pub fn save_to_default(&self) -> io::Result<()> {
+        if let Some(path) = active_catalogue_file_path() {
+            self.save_to_file(&path)?;
+        }
+        Ok(())
+    }
+
+    /// Load a catalogue snapshot from disk.
+    pub fn load_from_file(path: &Path) -> io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let entries_vec: Vec<CatalogEntry> = serde_json::from_slice(&bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut entries = HashMap::with_capacity(entries_vec.len());
+        for entry in entries_vec {
+            entries.insert(entry.game.game_id.clone(), entry);
+        }
+        Ok(Self { entries })
+    }
+
+    /// Load from `path` if present and non-empty (merging missing seeded entries
+    /// as disabled fallback); otherwise return the seeded defaults.
+    pub fn load_or_seed(path: &Path) -> Self {
+        if path.is_file() {
+            match Self::load_from_file(path) {
+                Ok(mut loaded) if !loaded.entries.is_empty() => {
+                    let seeded = Self::new();
+                    for (id, entry) in seeded.entries {
+                        loaded.entries.entry(id).or_insert(CatalogEntry {
+                            game: entry.game,
+                            enabled: false,
+                        });
+                    }
+                    return loaded;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to load catalogue file; falling back to defaults");
+                }
+            }
+        }
+        Self::new()
+    }
+
+    /// Load from `BOSS_CATALOGUE_FILE` (or `/data/beercade/catalogue.json`), falling back to seeded defaults.
+    pub fn load_or_default() -> Self {
+        match active_catalogue_file_path() {
+            Some(path) => Self::load_or_seed(&path),
+            None => Self::new(),
+        }
+    }
+
+    /// Merge scanned ROMs into the catalogue without overwriting existing `enabled` flags.
+    pub fn merge_scanned_games(&mut self, scanned: Vec<GameRef>) -> usize {
+        let count = scanned.len();
+        for game in scanned {
+            let matched_key = if self.entries.contains_key(&game.game_id) {
+                Some(game.game_id.clone())
+            } else {
+                self.entries
+                    .iter()
+                    .find(|(_, e)| {
+                        e.game.system.eq_ignore_ascii_case(&game.system)
+                            && e.game.file_name.eq_ignore_ascii_case(&game.file_name)
+                    })
+                    .map(|(k, _)| k.clone())
+            };
+
+            if let Some(key) = matched_key {
+                if let Some(existing) = self.entries.get_mut(&key) {
+                    existing.game.sha256 = game.sha256;
+                    existing.game.size_bytes = game.size_bytes;
+                    existing.game.file_name = game.file_name;
+                }
+            } else {
+                self.insert(game, true);
+            }
+        }
+        count
+    }
+
+    /// Scan `<dir>/<system>/*` (and top-level ROMs) synchronously, merging into `self`
+    /// while preserving existing `enabled` flags.
+    pub fn scan_roms_dir(&mut self, dir: &Path) -> io::Result<usize> {
+        let games = collect_roms_from_dir(dir)?;
+        Ok(self.merge_scanned_games(games))
+    }
+
     /// Import a ROM file from disk by hashing it with SHA-256 and measuring its size.
     pub fn import_rom_file(&mut self, path: &Path, system: &str, core: &str) -> io::Result<GameRef> {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"))?
-            .to_string();
-        let metadata = std::fs::metadata(path)?;
-        let size_bytes = metadata.len();
-        let sha256 = compute_sha256(path)?;
-        let game_id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&file_name)
-            .to_lowercase()
-            .replace(' ', "_");
-        let title = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&file_name)
-            .to_string();
-
-        let game = GameRef {
-            game_id,
-            title,
-            system: system.to_string(),
-            core: core.to_string(),
-            file_name,
-            size_bytes,
-            sha256,
-            artwork_url: None,
-        };
+        let game = build_game_ref_from_rom(path, system, core)?;
         self.insert(game.clone(), true);
         Ok(game)
     }
@@ -237,15 +498,17 @@ impl GameCatalogue {
     /// Resolve a ROM file path on disk across standard B.E.E.R.C.A.D.E. storage paths.
     ///
     /// Checks:
-    /// - `BOSS_ROMS_DIR` env variable if configured
+    /// - `BOSS_ROMS_DIR` env variable (direct and immediate `<system>` subdirectories)
     /// - `/data/beercade/games/{file_name}`
-    /// - `/data/beercade/roms/{file_name}`
-    /// - `/data/beercade/roms/snes/{file_name}`
+    /// - `/data/beercade/roms/{file_name}` and `/data/beercade/roms/*/{file_name}`
     /// - fallback `astro/roms/{file_name}` and `../astro/roms/{file_name}`
     pub fn resolve_rom_path(&self, file_name: &str) -> Option<PathBuf> {
         let mut candidates = Vec::new();
         if let Ok(env_dir) = std::env::var("BOSS_ROMS_DIR") {
-            candidates.push(PathBuf::from(env_dir));
+            let trimmed = env_dir.trim();
+            if !trimmed.is_empty() {
+                candidates.push(PathBuf::from(trimmed));
+            }
         }
         candidates.push(PathBuf::from("/data/beercade/games"));
         candidates.push(PathBuf::from("/data/beercade/roms"));
@@ -253,10 +516,21 @@ impl GameCatalogue {
         candidates.push(PathBuf::from("astro/roms"));
         candidates.push(PathBuf::from("../astro/roms"));
 
-        for base in candidates {
+        for base in &candidates {
             let candidate = base.join(file_name);
             if candidate.is_file() {
                 return Some(candidate);
+            }
+            if let Ok(rd) = std::fs::read_dir(base) {
+                for entry in rd.flatten() {
+                    let sub = entry.path();
+                    if sub.is_dir() {
+                        let nested = sub.join(file_name);
+                        if nested.is_file() {
+                            return Some(nested);
+                        }
+                    }
+                }
             }
         }
         None
@@ -319,6 +593,40 @@ impl GameCatalogue {
 
         result
     }
+}
+
+/// Async helper: hash ROMs under `dir` in `spawn_blocking`, merge into `state.catalogue`,
+/// and atomically persist to `BOSS_CATALOGUE_FILE` (best-effort if default path is unwritable).
+pub async fn scan_and_merge_into_state(
+    state: &crate::state::SharedState,
+    dir: &Path,
+) -> io::Result<(usize, usize)> {
+    let dir_buf = dir.to_path_buf();
+    let scanned = tokio::task::spawn_blocking(move || collect_roms_from_dir(&dir_buf))
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("scan task failed: {e}")))??;
+
+    let (imported, total, snapshot) = {
+        let mut cat = state.catalogue.write().await;
+        let imported = cat.merge_scanned_games(scanned);
+        let total = cat.len();
+        (imported, total, cat.clone())
+    };
+
+    if let Some(persist_path) = active_catalogue_file_path() {
+        let persist_res = tokio::task::spawn_blocking(move || snapshot.save_to_file(&persist_path)).await;
+        match persist_res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "could not persist scanned catalogue");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "catalogue persistence task panicked");
+            }
+        }
+    }
+
+    Ok((imported, total))
 }
 
 #[cfg(test)]
@@ -406,5 +714,48 @@ mod tests {
         let resolved = cat.resolve_rom_path("Batman Returns.zip").unwrap();
         let hash = compute_sha256(&resolved).unwrap();
         assert_eq!(hash, "c49a290ebf4b60730997a3ffd1347a06cf982479dbb529d3a1d02c3528a3c717");
+    }
+
+    #[test]
+    fn test_scan_roms_dir_and_atomic_persistence_preserves_enabled() {
+        let tmp_root = std::env::temp_dir().join(format!("boss-cat-test-{}", uuid::Uuid::new_v4()));
+        let snes_dir = tmp_root.join("roms").join("snes");
+        let arcade_dir = tmp_root.join("roms").join("arcade");
+        std::fs::create_dir_all(&snes_dir).unwrap();
+        std::fs::create_dir_all(&arcade_dir).unwrap();
+
+        let rom_bytes = b"BEERCADE_TEST_ROM_PAYLOAD_V1";
+        let expected_hash = beercade_shared::crypto::compute_sha256(rom_bytes);
+        std::fs::write(snes_dir.join("Chrono Trigger.sfc"), rom_bytes).unwrap();
+        std::fs::write(arcade_dir.join("sfiii3.zip"), b"REAL_SFIII3_ROM").unwrap();
+        std::fs::write(arcade_dir.join("readme.txt"), b"ignore").unwrap();
+
+        let mut cat = GameCatalogue::new();
+        cat.set_enabled("sfiii3", false);
+
+        let scanned_count = cat.scan_roms_dir(&tmp_root.join("roms")).unwrap();
+        assert_eq!(scanned_count, 2);
+
+        let chrono = cat.get("chrono_trigger").unwrap();
+        assert_eq!(chrono.game.system, "snes");
+        assert_eq!(chrono.game.core, "snes9x");
+        assert_eq!(chrono.game.sha256, expected_hash);
+        assert!(chrono.enabled);
+
+        // Disabled flag preserved while hash updated from placeholder
+        let sf3 = cat.get("sfiii3").unwrap();
+        assert!(!sf3.enabled);
+        assert_eq!(
+            sf3.game.sha256,
+            beercade_shared::crypto::compute_sha256(b"REAL_SFIII3_ROM")
+        );
+
+        let cat_file = tmp_root.join("catalogue.json");
+        cat.save_to_file(&cat_file).unwrap();
+        let reloaded = GameCatalogue::load_or_seed(&cat_file);
+        assert_eq!(reloaded.get("chrono_trigger").unwrap().game.sha256, expected_hash);
+        assert!(!reloaded.get("sfiii3").unwrap().enabled);
+
+        let _ = std::fs::remove_dir_all(&tmp_root);
     }
 }

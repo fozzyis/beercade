@@ -1,10 +1,11 @@
+use std::io::{Read, Write};
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use reqwest::Client;
-use sha2::{Sha256, Digest};
 
 use beercade_hal::Platform;
+use beercade_shared::crypto::{verify_sha256_hex, Sha256Hasher};
 
 // The system boots from one of two SquashFS slots; we OTA to the *other* slot
 // and then flip the bootloader target so the active runtime is never touched
@@ -17,18 +18,29 @@ pub const STAGING_PATH: &'static str = "/data/beercade/sync/staging.sqsh";
 pub const STAGING_DIR: &'static str = "/data/beercade/sync";
 
 /// Always keep this much spare space above the payload size before flashing.
+#[cfg(target_os = "linux")]
 const SPARE_MARGIN_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 
 /// Staging implementation: downloads, validates mandatory SHA-256 header, streams payload,
 /// checks hash integrity, and guarantees immediate deletion upon any failure.
+#[allow(dead_code)]
 pub async fn stage_ota_payload(
     boss_url: &str,
     filename: &str,
     boss_token: &str,
     staging_path: &Path,
 ) -> Result<u64, String> {
+    stage_ota_payload_with_client(&Client::new(), boss_url, filename, boss_token, staging_path).await
+}
+
+pub async fn stage_ota_payload_with_client(
+    client: &Client,
+    boss_url: &str,
+    filename: &str,
+    boss_token: &str,
+    staging_path: &Path,
+) -> Result<u64, String> {
     let url = beercade_shared::ipc::format_ota_download_url(boss_url, filename);
-    let client = Client::new();
     let mut response = client
         .get(&url)
         .bearer_auth(boss_token)
@@ -88,7 +100,7 @@ pub async fn stage_ota_payload(
         .map_err(|e| format!("failed to create staging file: {e}"))?;
 
     let mut total_bytes = 0u64;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
 
     while let Some(chunk_res) = response.chunk().await.transpose() {
         match chunk_res {
@@ -132,8 +144,8 @@ pub async fn stage_ota_payload(
     }
 
     // Validate SHA-256 Checksum
-    let actual = format!("{:x}", hasher.finalize()).to_ascii_lowercase();
-    if !beercade_shared::auth::constant_time_eq(actual.as_bytes(), expected_sha256.as_bytes()) {
+    let actual = hasher.finalize_hex();
+    if !verify_sha256_hex(&actual, &expected_sha256) {
         let _ = tokio::fs::remove_file(staging_path).await;
         return Err(format!(
             "SHA-256 mismatch: expected {}, got {}",
@@ -149,9 +161,20 @@ pub async fn stage_ota_payload(
 ///
 /// `boss_token` is forwarded as `Authorization: Bearer <token>` so that the
 /// BOSS `/api/v1/sync/<filename>` endpoint accepts the request.
+#[allow(dead_code)]
 pub async fn execute_ota_update(boss_url: &str, filename: &str, boss_token: &str) -> Result<(), String> {
+    execute_ota_update_with_client(&Client::new(), boss_url, filename, boss_token).await
+}
+
+pub async fn execute_ota_update_with_client(
+    client: &Client,
+    boss_url: &str,
+    filename: &str,
+    boss_token: &str,
+) -> Result<(), String> {
     let platform = Platform::detect();
     execute_ota_update_with(
+        client,
         boss_url,
         filename,
         boss_token,
@@ -165,6 +188,7 @@ pub async fn execute_ota_update(boss_url: &str, filename: &str, boss_token: &str
 }
 
 async fn execute_ota_update_with<F, Fut, C>(
+    client: &Client,
     boss_url: &str,
     filename: &str,
     boss_token: &str,
@@ -183,7 +207,7 @@ where
     let inactive_slot = platform.slot_device(target);
     println!("[i] OTA Update Triggered: {} -> {}", filename, inactive_slot);
 
-    let total_bytes = stage_ota_payload(boss_url, filename, boss_token, staging_path).await?;
+    let total_bytes = stage_ota_payload_with_client(client, boss_url, filename, boss_token, staging_path).await?;
     println!("[i] Staged {} bytes to {}", total_bytes, staging_path.display());
 
     // Always clean up the staged image once flashing/commit finishes or fails.
@@ -213,38 +237,32 @@ where
 
 /// Confirm the staging directory has room for `required` bytes (plus a safety
 /// margin) BEFORE we start pulling the payload off the network.
+#[cfg(target_os = "linux")]
 fn check_free_space(staging_dir: &Path, required: u64) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
     if required == 0 {
-        // Server did not advertise a size; skip the pre-flight (the flash step
-        // still validates the write rather than trusting a size we never had).
         return Ok(());
     }
-    let needed = required + SPARE_MARGIN_BYTES;
-    let output = match std::process::Command::new("df")
-        .arg("--output=avail")
-        .arg("-B1")
-        .arg(staging_dir)
-        .output()
-    {
-        Ok(out) => out,
-        Err(_) => {
-            // df is unavailable on non-Linux dev hosts (e.g. Windows); allow execution
-            return Ok(());
+    let needed = required.saturating_add(SPARE_MARGIN_BYTES);
+    let mut probe = staging_dir;
+    while !probe.exists() {
+        match probe.parent() {
+            Some(p) if !p.as_os_str().is_empty() => probe = p,
+            _ => break,
         }
+    }
+    let Ok(c_path) = CString::new(probe.as_os_str().as_bytes()) else {
+        return Ok(());
     };
-
-    if !output.status.success() {
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is a valid NUL-terminated string and `stat` is writable.
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
         return Ok(());
     }
-    let stdout = String::from_utf8(output.stdout).unwrap_or_default();
-    // `df --output=avail -B1 <dir>` prints a header line then a bare byte count.
-    let avail = stdout
-        .split_whitespace()
-        .last()
-        .and_then(|tok| tok.parse::<u64>().ok())
-        .unwrap_or(0);
-
-    if avail > 0 && avail < needed {
+    let avail = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
+    if avail < needed {
         return Err(format!(
             "insufficient free space on {}: need {} bytes (payload {} + margin) but only {} available",
             staging_dir.display(),
@@ -256,10 +274,15 @@ fn check_free_space(staging_dir: &Path, required: u64) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+fn check_free_space(_staging_dir: &Path, _required: u64) -> Result<(), String> {
+    Ok(())
+}
+
 /// Copy the verified staging image onto the inactive (non-mounted) boot slot.
 ///
 /// Because the inactive slot is not the running root, a partial write cannot
-/// corrupt the active runtime — and we only flip the boot target after `dd`
+/// corrupt the active runtime — and we only flip the boot target after `sync_all`
 /// reports success, making the swap effectively atomic from the bootloader's
 /// point of view.
 async fn flash_inactive_slot_async(staging_path: &str, inactive_slot: &str) -> Result<(), String> {
@@ -267,29 +290,43 @@ async fn flash_inactive_slot_async(staging_path: &str, inactive_slot: &str) -> R
     let slot = inactive_slot.to_string();
     tokio::task::spawn_blocking(move || flash_inactive_slot(&staging, &slot))
         .await
-        .map_err(|e| format!("dd task panicked/cancelled: {e}"))?
+        .map_err(|e| format!("flash task panicked/cancelled: {e}"))?
 }
 
 fn flash_inactive_slot(staging_path: &str, inactive_slot: &str) -> Result<(), String> {
-    let output = std::process::Command::new("dd")
-        .arg(format!("if={}", staging_path))
-        .arg(format!("of={}", inactive_slot))
-        .arg("bs=1M")
-        .arg("iflag=fullblock")
-        .arg("conv=fsync")
-        .arg("status=none")
-        .env("LC_ALL", "C")
-        .output()
-        .map_err(|e| format!("failed to run dd: {e}"))?;
+    const BUF_BYTES: usize = 1024 * 1024;
+    let mut src = std::fs::File::open(staging_path)
+        .map_err(|e| format!("failed to open staging image {staging_path}: {e}"))?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(inactive_slot)
+        .map_err(|e| {
+            format!("failed to open inactive slot {inactive_slot}: {e}; aborting OTA — active runtime untouched")
+        })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "dd failed ({}): {}; aborting OTA — active runtime untouched",
-            output.status,
-            stderr.trim()
-        ));
+    let mut buf = vec![0u8; BUF_BYTES];
+    let mut total: u64 = 0;
+    loop {
+        let n = src.read(&mut buf).map_err(|e| {
+            format!("failed reading staging image {staging_path}: {e}; aborting OTA")
+        })?;
+        if n == 0 {
+            break;
+        }
+        dst.write_all(&buf[..n]).map_err(|e| {
+            format!("failed writing inactive slot {inactive_slot}: {e}; aborting OTA — active runtime untouched")
+        })?;
+        total += n as u64;
     }
+
+    if dst.metadata().map(|m| m.file_type().is_file()).unwrap_or(false) {
+        let _ = dst.set_len(total);
+    }
+
+    dst.sync_all().map_err(|e| {
+        format!("failed syncing inactive slot {inactive_slot}: {e}; aborting OTA — active runtime untouched")
+    })?;
     Ok(())
 }
 
@@ -614,7 +651,9 @@ pub mod tests {
         let root = FakeRoot::new("ota-test-post-stage-cleanup");
         let staging_file = root.path().join("staging.sqsh");
 
+        let client = Client::new();
         let res = execute_ota_update_with(
+            &client,
             &server_url,
             "update.sqsh",
             "token",
@@ -630,6 +669,7 @@ pub mod tests {
 
         let (server_url2, _) = spawn_mock_ota_server(200, Some(&expected_sha), b"VALID_OTA_SQUASHFS_IMAGE".to_vec()).await;
         let res2 = execute_ota_update_with(
+            &client,
             &server_url2,
             "update.sqsh",
             "token",
@@ -642,5 +682,29 @@ pub mod tests {
         .await;
         assert!(res2.is_err());
         assert!(!staging_file.exists(), "staging file must be unlinked when commit_boot_slot fails");
+    }
+
+    #[tokio::test]
+    async fn test_native_flash_inactive_slot_byte_for_byte() {
+        let root = FakeRoot::new("ota-native-flash");
+        let staging_file = root.path().join("staging.sqsh");
+        let target_slot = root.path().join("slot_b.img");
+
+        // > 2 MiB payload spanning multiple 1 MiB buffers + partial tail.
+        let payload: Vec<u8> = (0..(2 * 1024 * 1024 + 1337))
+            .map(|i| ((i * 31 + 7) & 0xff) as u8)
+            .collect();
+        std::fs::write(&staging_file, &payload).unwrap();
+
+        flash_inactive_slot_async(
+            &staging_file.to_string_lossy(),
+            &target_slot.to_string_lossy(),
+        )
+        .await
+        .unwrap();
+
+        let flashed = std::fs::read(&target_slot).unwrap();
+        assert_eq!(flashed.len(), payload.len());
+        assert_eq!(flashed, payload);
     }
 }

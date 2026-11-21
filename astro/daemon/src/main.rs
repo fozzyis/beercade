@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration};
+use tokio::sync::{Notify, RwLock};
+use tokio::time::{interval_at, sleep, Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -19,7 +20,7 @@ use beercade_shared::auth::format_bearer_header;
 use beercade_shared::ipc::{endpoints, format_http_telemetry_url, format_ws_telemetry_url};
 pub use beercade_shared::models::{
     CabinetCommand, CabinetEvent, CommandAck, CreditCounters, ErrorEvent, GameRef, HighScoreEntry,
-    InputJitterStats, NodeTelemetry, StationMode,
+    InputJitterStats, NodeTelemetry, StationMode, WsServerMessage,
 };
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -39,6 +40,7 @@ pub struct DaemonSharedState {
     pub mode: StationMode,
     pub credits: CreditCounters,
     pub active_game: Option<ActiveGameInfo>,
+    pub active_game_pid: Option<u32>,
     pub credits_path: PathBuf,
     /// Root of the DATA partition (`/data/beercade`).
     pub data_dir: PathBuf,
@@ -51,6 +53,12 @@ pub struct DaemonSharedState {
     pub attract_running: bool,
     /// Venue theme from B.O.S.S., for the shell and the overlay.
     pub theme: String,
+    pub http_client: reqwest::Client,
+    pub ra: overlay::RetroArch,
+    pub shell: shell_ipc::ShellPublisher,
+    pub game_exit_notify: Arc<Notify>,
+    pub attract_notify: Arc<Notify>,
+    pub input_grab: Arc<AtomicBool>,
 }
 
 impl DaemonSharedState {
@@ -407,40 +415,16 @@ pub async fn submit_high_score(
     }
 }
 
-/// Stop or pause any active frontend (ES-DE / attraction) so RetroArch gets exclusive KMS/DRM control.
-pub async fn pause_frontend() {
-    #[cfg(target_os = "linux")]
-    {
-        // 1. Try systemd service stop if managed under systemd
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["stop", "astro-frontend.service"])
-            .status()
-            .await;
-
-        // 2. Fallback / supplementary: send SIGSTOP to running es-de processes so display isn't contested
-        let _ = tokio::process::Command::new("killall")
-            .args(["-STOP", "es-de", "emulationstation"])
-            .status()
-            .await;
-    }
+/// Suspend the resident `astro-shell` so RetroArch gets exclusive KMS/DRM control.
+pub async fn pause_frontend(state_arc: &Arc<RwLock<DaemonSharedState>>) {
+    let shell = state_arc.read().await.shell.clone();
+    shell.suspend_for_game(state_arc).await;
 }
 
-/// Resume or restart the frontend once the game exits.
-pub async fn resume_frontend() {
-    #[cfg(target_os = "linux")]
-    {
-        // 1. Try resuming any stopped frontend
-        let _ = tokio::process::Command::new("killall")
-            .args(["-CONT", "es-de", "emulationstation"])
-            .status()
-            .await;
-
-        // 2. Ensure astro-frontend.service is active or started
-        let _ = tokio::process::Command::new("systemctl")
-            .args(["start", "astro-frontend.service"])
-            .status()
-            .await;
-    }
+/// Resume the resident `astro-shell` once the game exits.
+pub async fn resume_frontend(state_arc: &Arc<RwLock<DaemonSharedState>>) {
+    let shell = state_arc.read().await.shell.clone();
+    shell.resume_after_game(state_arc).await;
 }
 
 /// Mirror the session into the telemetry `mode` B.O.S.S. already reads.
@@ -459,21 +443,40 @@ fn sync_session_mode(st: &mut DaemonSharedState) {
         }
         None => {}
     }
+    st.shell.notify_state(st);
+}
+
+fn should_request_attract(st: &DaemonSharedState) -> bool {
+    st.session.as_ref().is_none_or(|s| !s.is_live()) && !st.attract_running
+}
+
+fn url_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "%{b:02X}");
+        }
+    }
+    out
 }
 
 /// Tell B.O.S.S. about a session or attract event. Best effort: B.O.S.S.
 /// also sees the session through telemetry.
 async fn post_cabinet_event(state_arc: &Arc<RwLock<DaemonSharedState>>, ev: &CabinetEvent) {
-    let (boss_url, token, node_id) = {
+    let (client, boss_url, token, node_id) = {
         let st = state_arc.read().await;
-        (st.boss_url.clone(), st.boss_token.clone(), st.node_id.clone())
+        (
+            st.http_client.clone(),
+            st.boss_url.clone(),
+            st.boss_token.clone(),
+            st.node_id.clone(),
+        )
     };
     let url = format!("{}/api/v1/cabinet/{}/events", boss_url.trim_end_matches('/'), node_id);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .unwrap_or_default();
-    let mut req = client.post(&url).json(ev);
+    let mut req = client.post(&url).timeout(Duration::from_secs(3)).json(ev);
     if !token.is_empty() {
         req = req.bearer_auth(token);
     }
@@ -486,7 +489,10 @@ async fn post_cabinet_event(state_arc: &Arc<RwLock<DaemonSharedState>>, ev: &Cab
 
 /// Carry out what the session state machine asked for. Each piece of I/O runs
 /// on its own task, so callers must not hold the state lock across this.
-fn apply_session_effects(state_arc: &Arc<RwLock<DaemonSharedState>>, fx: Vec<session::Effect>) {
+pub(crate) fn apply_session_effects(
+    state_arc: &Arc<RwLock<DaemonSharedState>>,
+    fx: Vec<session::Effect>,
+) {
     use session::Effect;
     for e in fx {
         let st = state_arc.clone();
@@ -495,13 +501,19 @@ fn apply_session_effects(state_arc: &Arc<RwLock<DaemonSharedState>>, fx: Vec<ses
                 tokio::spawn(async move { post_cabinet_event(&st, &ev).await });
             }
             Effect::PauseGame => {
-                tokio::spawn(async { overlay::RetroArch::default().set_paused(true).await });
+                tokio::spawn(async move {
+                    let ra = st.read().await.ra.clone();
+                    ra.set_paused(true).await;
+                });
             }
             Effect::ResumeGame => {
-                tokio::spawn(async { overlay::RetroArch::default().set_paused(false).await });
+                tokio::spawn(async move {
+                    let ra = st.read().await.ra.clone();
+                    ra.set_paused(false).await;
+                });
             }
             Effect::CloseGame => {
-                tokio::spawn(terminate_running_game());
+                tokio::spawn(async move { terminate_running_game(&st).await });
             }
             Effect::Stage(games) => {
                 tokio::spawn(stage_session_games(st, games));
@@ -525,39 +537,66 @@ fn apply_session_effects(state_arc: &Arc<RwLock<DaemonSharedState>>, fx: Vec<ses
             }
             Effect::Wipe => {
                 tokio::spawn(async move {
-                    let dir = staging::session_dir(&st.read().await.data_dir);
+                    let (data_dir, attract_notify) = {
+                        let s = st.read().await;
+                        (s.data_dir.clone(), s.attract_notify.clone())
+                    };
+                    let dir = staging::session_dir(&data_dir);
                     match staging::wipe(&dir) {
                         Ok(()) => tracing::info!("Session files wiped"),
                         Err(e) => tracing::error!("Failed to wipe session files: {e}"),
                     }
+                    staging::wipe_patron_artifacts(&data_dir).await;
+                    attract_notify.notify_one();
                 });
             }
         }
     }
 }
 
-/// Fetch a session's games from B.O.S.S. and tell the session when done.
+/// Stream a session's games from B.O.S.S. and unlock `Picker` on the first ready ROM.
 async fn stage_session_games(state_arc: Arc<RwLock<DaemonSharedState>>, games: Vec<GameRef>) {
     let (stager, dir, session_id) = {
         let s = state_arc.read().await;
         (
-            staging::Stager::new(&s.boss_url, &s.boss_token, &s.node_id),
+            staging::Stager::with_client_and_config(
+                s.http_client.clone(),
+                &s.boss_url,
+                &s.boss_token,
+                &s.node_id,
+                staging::StageConfig::from_data_dir(&s.data_dir),
+            ),
             staging::session_dir(&s.data_dir),
             s.session.as_ref().map(|x| x.id.clone()),
         )
     };
-    let (ready, failed) = stager.stage_all(&games, &dir).await;
-    let fx = {
-        let mut s = state_arc.write().await;
-        match s.session.as_mut() {
-            Some(sess) if Some(&sess.id) == session_id.as_ref() && sess.is_live() => {
-                sess.staged(ready, failed)
+    stager
+        .stage_streaming(&games, &dir, |id, res| {
+            let state_arc = state_arc.clone();
+            let session_id = session_id.clone();
+            async move {
+                let (ready, failed) = match res {
+                    Ok(_) => (vec![id], Vec::new()),
+                    Err(e) => {
+                        tracing::warn!(game_id = %id, "Staging failed: {e}");
+                        (Vec::new(), vec![id])
+                    }
+                };
+                let fx = {
+                    let mut s = state_arc.write().await;
+                    match s.session.as_mut() {
+                        Some(sess) if Some(&sess.id) == session_id.as_ref() && sess.is_live() => {
+                            let fx = sess.staged(ready, failed);
+                            s.shell.notify_state(&s);
+                            fx
+                        }
+                        _ => Vec::new(),
+                    }
+                };
+                apply_session_effects(&state_arc, fx);
             }
-            // The session ended or was replaced while downloading.
-            _ => Vec::new(),
-        }
-    };
-    apply_session_effects(&state_arc, fx);
+        })
+        .await;
 }
 
 /// Attract mode from a B.O.S.S. playlist: fetch the games, then cycle them
@@ -575,7 +614,13 @@ async fn run_attract(
     let (stager, dir) = {
         let s = state_arc.read().await;
         (
-            staging::Stager::new(&s.boss_url, &s.boss_token, &s.node_id),
+            staging::Stager::with_client_and_config(
+                s.http_client.clone(),
+                &s.boss_url,
+                &s.boss_token,
+                &s.node_id,
+                staging::StageConfig::from_data_dir(&s.data_dir),
+            ),
             staging::attract_dir(&s.data_dir),
         )
     };
@@ -614,12 +659,12 @@ async fn run_attract(
                 break 'cycle;
             }
         }
-        terminate_running_game().await;
+        terminate_running_game(&state_arc).await;
         sleep(Duration::from_secs(1)).await;
     }
 
     // Superseded (session or newer playlist): clear the screen for it.
-    terminate_running_game().await;
+    terminate_running_game(&state_arc).await;
     let mut st = state_arc.write().await;
     if st.attract_gen == gen {
         st.attract_running = false;
@@ -631,14 +676,36 @@ async fn run_attract(
     }
 }
 
-/// Terminate any running emulator instances (e.g. on session expiration).
-pub async fn terminate_running_game() {
+/// Terminate the active emulator instance cleanly via RetroArch `QUIT` + `SIGTERM`
+/// on its stored PID, waiting briefly for DRM release.
+pub async fn terminate_running_game(state_arc: &Arc<RwLock<DaemonSharedState>>) {
+    let (pid, ra, exit_notify) = {
+        let st = state_arc.read().await;
+        (st.active_game_pid, st.ra.clone(), st.game_exit_notify.clone())
+    };
+    let Some(_pid) = pid else {
+        return;
+    };
+    ra.quit().await;
     #[cfg(target_os = "linux")]
-    {
-        let _ = tokio::process::Command::new("killall")
-            .args(["-TERM", "retroarch"])
-            .status()
-            .await;
+    // SAFETY: `_pid` is the child RetroArch PID spawned by this daemon and not yet reaped.
+    unsafe {
+        libc::kill(_pid as i32, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if state_arc.read().await.active_game_pid.is_none() {
+            break;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let notified = exit_notify.notified();
+        if state_arc.read().await.active_game_pid.is_none() {
+            break;
+        }
+        let _ = tokio::time::timeout(deadline - now, notified).await;
     }
 }
 
@@ -698,19 +765,20 @@ async fn execute_cabinet_command(
             (true, Some(serde_json::json!({ "seq": seq })))
         }
         CabinetCommand::AddCredits { credits } => {
-            let mut st = state_arc.write().await;
-            st.add_credits(*credits);
-            let available = st.credits.credits_available;
-            tracing::info!(added = %credits, available = %available, "Credits added");
-            drop(st);
-            overlay::RetroArch::default()
-                .show(&format!("+{credits} CREDIT \u{00B7} CREDIT {available:02}"))
+            let ra = {
+                let mut st = state_arc.write().await;
+                st.add_credits(*credits);
+                let available = st.credits.credits_available;
+                tracing::info!(added = %credits, available = %available, "Credits added");
+                (st.ra.clone(), available)
+            };
+            ra.0.show(&format!("+{credits} CREDIT \u{00B7} CREDIT {:02}", ra.1))
                 .await;
             (
                 true,
                 Some(serde_json::json!({
                     "credits_added": credits,
-                    "credits_available": available,
+                    "credits_available": ra.1,
                 })),
             )
         }
@@ -729,24 +797,26 @@ async fn execute_cabinet_command(
                 overlay::CONTINUE_SECS,
                 games.clone(),
             );
-            let mut st = state_arc.write().await;
-            // A new session replaces any other: its files go first.
-            let mut old_fx = Vec::new();
-            if let Some(old) = st.session.as_mut() {
-                old_fx = old.end();
-            }
-            if let Err(e) = staging::wipe(&staging::session_dir(&st.data_dir)) {
-                tracing::error!("Failed to wipe previous session files: {e}");
-            }
-            st.session = Some(sess);
-            sync_session_mode(&mut st);
-            drop(st);
-            old_fx.retain(|e| matches!(e, session::Effect::Event(_)));
-            apply_session_effects(state_arc, old_fx);
+            let (old_fx, data_dir, ra) = {
+                let mut st = state_arc.write().await;
+                let mut old_fx = Vec::new();
+                if let Some(old) = st.session.as_mut() {
+                    old_fx = old.end();
+                }
+                if let Err(e) = staging::wipe(&staging::session_dir(&st.data_dir)) {
+                    tracing::error!("Failed to wipe previous session files: {e}");
+                }
+                st.session = Some(sess);
+                sync_session_mode(&mut st);
+                (old_fx, st.data_dir.clone(), st.ra.clone())
+            };
+            staging::wipe_patron_artifacts(&data_dir).await;
+            let mut old_events = old_fx;
+            old_events.retain(|e| matches!(e, session::Effect::Event(_)));
+            apply_session_effects(state_arc, old_events);
             apply_session_effects(state_arc, fx);
             tracing::info!(session_id = %session_id, duration_secs = %duration_secs, games = games.len(), "Session started");
-            overlay::RetroArch::default()
-                .show(&format!("TIME {} \u{00B7} GAME ON", overlay::fmt_clock(*duration_secs)))
+            ra.show(&format!("TIME {} \u{00B7} GAME ON", overlay::fmt_clock(*duration_secs)))
                 .await;
             (
                 true,
@@ -775,21 +845,28 @@ async fn execute_cabinet_command(
             (true, Some(serde_json::json!({ "session_id": session_id, "time_remaining_sec": remaining })))
         }
         CabinetCommand::EndSession { session_id, reason } => {
-            let mut st = state_arc.write().await;
-            let mut fx = Vec::new();
-            if let Some(sess) = st.session.as_mut() {
-                if session_id.as_ref().map_or(true, |id| id == &sess.id) {
-                    fx = sess.end();
+            let (mut fx, data_dir, attract_notify) = {
+                let mut st = state_arc.write().await;
+                let mut fx = Vec::new();
+                if let Some(sess) = st.session.as_mut() {
+                    if session_id.as_ref().map_or(true, |id| id == &sess.id) {
+                        fx = sess.end();
+                    }
                 }
-            }
-            st.mode = StationMode::Locked {
-                reason: reason.clone().unwrap_or_else(|| "Session ended by supervisor".to_string()),
+                st.mode = StationMode::Locked {
+                    reason: reason.clone().unwrap_or_else(|| "Session ended by supervisor".to_string()),
+                };
+                st.shell.notify_state(&st);
+                (fx, st.data_dir.clone(), st.attract_notify.clone())
             };
-            drop(st);
+            fx.retain(|e| !matches!(e, session::Effect::Wipe));
             apply_session_effects(state_arc, fx);
-            terminate_running_game().await;
-            resume_frontend().await;
-            tracing::info!("Session ended: terminated game, resumed frontend");
+            terminate_running_game(state_arc).await;
+            let _ = staging::wipe(&staging::session_dir(&data_dir));
+            staging::wipe_patron_artifacts(&data_dir).await;
+            resume_frontend(state_arc).await;
+            attract_notify.notify_one();
+            tracing::info!("Session ended: terminated game, wiped patron artifacts, resumed shell");
             (true, Some(serde_json::json!({ "status": "session_ended" })))
         }
         CabinetCommand::StartAttract { games, secs_per_game } => {
@@ -833,7 +910,8 @@ async fn execute_cabinet_command(
     }
 }
 
-/// Launch a game through the KMS launcher and watch it until it exits.
+/// Launch RetroArch directly on KMS/DRM (folding `astro_kms_launcher.sh`
+/// into Rust via `beercade_hal::probe_drm_card()`) and watch until exit.
 async fn launch_game(
     core: &String,
     rom: &String,
@@ -851,19 +929,44 @@ async fn launch_game(
         let resolved_core = resolve_core_path(core);
         let resolved_rom = resolve_rom_path(rom);
 
+        let card = beercade_hal::probe_drm_card();
+        let astro_dev = std::env::var("ASTRO_DEV")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
+                card.as_ref()
+                    .map(|c| c.dev_path.clone())
+                    .unwrap_or_else(|| "/dev/dri/card0".to_string())
+            });
+        let kms_index = Path::new(&astro_dev)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .and_then(|n| n.strip_prefix("card"))
+            .map(ToString::to_string)
+            .unwrap_or_else(|| {
+                card.as_ref()
+                    .map(|c| c.index.to_string())
+                    .unwrap_or_else(|| "0".to_string())
+            });
+        let drv = card.as_ref().map(|c| c.driver.as_str()).unwrap_or("");
+
         tracing::info!(
             core = %resolved_core,
             rom = %resolved_rom,
             netplay = %netplay,
-            "Launching game via astro_kms_launcher.sh"
+            drm_dev = %astro_dev,
+            driver = %drv,
+            "Launching RetroArch directly on KMS/DRM"
         );
 
-        // 1. Take over display: stop or pause the frontend
-        pause_frontend().await;
+        // 1. Suspend resident shell so RetroArch gets exclusive KMS/DRM master.
+        pause_frontend(state_arc).await;
 
-        // 2. Set active game in state
-        let session_game = {
+        // 2. Set active game and reset pause/grab state.
+        let (session_game, data_dir, ra) = {
             let mut st = state_arc.write().await;
+            st.ra.reset_pause_state();
+            input::set_grab(&st.input_grab, false);
             let file = Path::new(&resolved_rom)
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
@@ -877,12 +980,6 @@ async fn launch_game(
                     fx = sess.game_started(&id);
                 }
             }
-            drop(st);
-            apply_session_effects(state_arc, fx);
-            game_id
-        };
-        {
-            let mut st = state_arc.write().await;
             st.active_game = Some(ActiveGameInfo {
                 core: core.clone(),
                 rom: rom.clone(),
@@ -893,29 +990,51 @@ async fn launch_game(
                 measured_fps: Some(60.0),
                 frame_time_ms: Some(16.63),
             });
+            st.shell.notify_state(&st);
+            let data_dir = st.data_dir.clone();
+            let ra = st.ra.clone();
+            drop(st);
+            apply_session_effects(state_arc, fx);
+            (game_id, data_dir, ra)
+        };
+
+        // 3. Build RetroArch command directly with KMSDRM env and --appendconfig.
+        let mut append_parts: Vec<String> = Vec::new();
+        let overlay_cfg = overlay::cfg_path(&data_dir);
+        if overlay_cfg.exists() {
+            append_parts.push(overlay_cfg.to_string_lossy().to_string());
+        }
+        #[cfg(target_arch = "x86_64")]
+        if !matches!(drv, "amdgpu" | "i915" | "xe") && !drv.starts_with("nvidia") {
+            let gl_cfg = data_dir.join("cache").join("retroarch-gl.cfg");
+            if let Some(parent) = gl_cfg.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::write(&gl_cfg, "video_driver = \"gl\"\nvideo_context_driver = \"kms\"\n").is_ok() {
+                append_parts.push(gl_cfg.to_string_lossy().to_string());
+            }
         }
 
-        // 3. Find launcher script path
-        let launcher_candidates = [
-            "/usr/lib/beercade/astro_kms_launcher.sh",
-            "astro/launcher/astro_kms_launcher.sh",
-            "/usr/local/bin/astro_kms_launcher",
-        ];
-        let launcher_script = launcher_candidates
-            .iter()
-            .find(|p| Path::new(p).exists())
-            .unwrap_or(&"/usr/lib/beercade/astro_kms_launcher.sh");
-
-        // 4. Build command arguments
-        let mut cmd_builder = tokio::process::Command::new("/bin/sh");
-        cmd_builder.arg(launcher_script);
-        cmd_builder.arg("/usr/bin/retroarch");
-        cmd_builder.arg("-L");
-        cmd_builder.arg(&resolved_core);
-        cmd_builder.arg(&resolved_rom);
-
+        let mut cmd_builder = tokio::process::Command::new("/usr/bin/retroarch");
+        cmd_builder
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("XDG_SESSION_TYPE")
+            .env_remove("XAUTHORITY")
+            .env("SDL_VIDEODRIVER", "kmsdrm")
+            .env("SDL_AUDIODRIVER", "alsa")
+            .env("DRM_DEVICE", &astro_dev)
+            .env("SDL_KMSDRM_DEVICE_INDEX", &kms_index);
+        if drv.starts_with("nvidia") {
+            cmd_builder
+                .env("GBM_BACKEND", "nvidia-drm")
+                .env("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
+        }
+        if !append_parts.is_empty() {
+            cmd_builder.arg("--appendconfig").arg(append_parts.join("|"));
+        }
+        cmd_builder.arg("-L").arg(&resolved_core).arg(&resolved_rom);
         if *netplay {
-            // If netplay requested, enable retroarch netplay flags if peer is configured
             cmd_builder.arg("--netplay");
         }
 
@@ -924,9 +1043,13 @@ async fn launch_game(
             (st.boss_url.clone(), st.boss_token.clone(), st.node_id.clone())
         };
 
-        // Spawn the process
+        // Spawn RetroArch directly and store its PID for deterministic SIGTERM.
         match cmd_builder.spawn() {
             Ok(mut child) => {
+                {
+                    let mut st = state_arc.write().await;
+                    st.active_game_pid = child.id();
+                }
                 let state_clone = state_arc.clone();
                 let client_clone = client.clone();
                 let core_clone = core.clone();
@@ -936,22 +1059,26 @@ async fn launch_game(
                     let status = child.wait().await;
                     tracing::info!(?status, "RetroArch process exited");
 
-                    // Clear active game in state
+                    // Clear active game, PID, pause state, and menu grab.
                     let attract_running = {
                         let mut st = state_clone.write().await;
                         st.active_game = None;
+                        st.active_game_pid = None;
+                        ra.reset_pause_state();
+                        input::set_grab(&st.input_grab, false);
                         let crashed = !matches!(&status, Ok(c) if c.success());
                         let fx = match (st.session.as_mut(), &session_game) {
                             (Some(sess), Some(id)) => sess.game_exited(id, crashed),
                             _ => Vec::new(),
                         };
+                        st.shell.notify_state(&st);
+                        st.game_exit_notify.notify_waiters();
                         let attract = st.attract_running;
                         drop(st);
                         apply_session_effects(&state_clone, fx);
                         attract
                     };
 
-                    // Check if game crashed or exited with failure
                     match status {
                         Ok(exit_code) if !exit_code.success() => {
                             let msg = format!(
@@ -993,10 +1120,9 @@ async fn launch_game(
                         _ => {}
                     }
 
-                    // Return the display cleanly to ES-DE / attract mode;
-                    // between attract games the playlist keeps it.
+                    // Resume resident shell unless an attract playlist keeps the display.
                     if !attract_running {
-                        resume_frontend().await;
+                        resume_frontend(&state_clone).await;
                     }
                 });
 
@@ -1011,11 +1137,15 @@ async fn launch_game(
                 )
             }
             Err(e) => {
-                let err_msg = format!("Failed to spawn game launcher {launcher_script}: {e}");
+                let err_msg = format!("Failed to spawn /usr/bin/retroarch: {e}");
                 tracing::error!("{}", err_msg);
                 {
                     let mut st = state_arc.write().await;
                     st.active_game = None;
+                    st.active_game_pid = None;
+                    ra.reset_pause_state();
+                    input::set_grab(&st.input_grab, false);
+                    st.game_exit_notify.notify_waiters();
                 }
                 report_node_error(
                     client,
@@ -1028,7 +1158,7 @@ async fn launch_game(
                     Some(serde_json::json!({ "core": core, "rom": rom })),
                 )
                 .await;
-                resume_frontend().await;
+                resume_frontend(state_arc).await;
                 (
                     false,
                     Some(serde_json::json!({ "error": err_msg })),
@@ -1101,12 +1231,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = overlay::write_cfg(&credits_dir, overlay::DEFAULT_THEME) {
         tracing::warn!("Failed to write overlay config: {e}");
     }
-    // No game files survive a restart or power cut.
+    // No game files or patron artifacts survive a restart or power cut.
     for dir in [staging::session_dir(&credits_dir), staging::attract_dir(&credits_dir)] {
         if let Err(e) = staging::wipe(&dir) {
             tracing::error!(dir = %dir.display(), "Failed to wipe staged games: {e}");
         }
     }
+    staging::wipe_patron_artifacts(&credits_dir).await;
+
+    let shared_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(3))
+        .build()?;
+    let shared_ra = overlay::RetroArch::default();
+    let game_exit_notify = Arc::new(Notify::new());
+    let attract_notify = Arc::new(Notify::new());
+    let input_grab = Arc::new(AtomicBool::new(false));
+    let shell_pub = shell_ipc::ShellPublisher::new(beercade_shared::shell::ShellFrame {
+        node_id: node_id.clone(),
+        theme: overlay::DEFAULT_THEME.to_string(),
+        view: beercade_shared::shell::ShellView::Idle,
+    });
 
     let daemon_state = Arc::new(RwLock::new(DaemonSharedState {
         node_id: node_id.clone(),
@@ -1115,22 +1260,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode: StationMode::Standalone,
         credits: initial_credits,
         active_game: None,
+        active_game_pid: None,
         credits_path,
         data_dir: credits_dir.clone(),
         session: None,
         attract_gen: 0,
         attract_running: false,
         theme: overlay::DEFAULT_THEME.to_string(),
+        http_client: shared_client.clone(),
+        ra: shared_ra.clone(),
+        shell: shell_pub.clone(),
+        game_exit_notify: game_exit_notify.clone(),
+        attract_notify: attract_notify.clone(),
+        input_grab: input_grab.clone(),
     }));
-    shell_ipc::spawn(
-        daemon_state.clone(),
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .unwrap_or_default(),
-    );
+    if shell_ipc::spawn(daemon_state.clone(), shared_client.clone(), shell_pub.clone()) {
+        let _ = beercade_hal::sd_notify_ready();
+    }
 
-    let reconnect_notify = Arc::new(tokio::sync::Notify::new());
+    let reconnect_notify = Arc::new(Notify::new());
     let discovery_port: u16 = std::env::var("ASTRO_DISCOVERY_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -1141,22 +1289,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         discovery_port,
     );
 
+    let ws_connected = Arc::new(AtomicBool::new(false));
+    let ws_state_notify = Arc::new(Notify::new());
+
     if is_standalone {
         println!("[✓] A.S.T.R.O. Daemon running in Standalone Mode (BOSS hub connection disabled).");
     } else {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(1500))
-            .build()?;
-
         let telemetry_state = daemon_state.clone();
-        let telemetry_client = client.clone();
+        let telemetry_client = shared_client.clone();
         let reconnect_notify_ws = reconnect_notify.clone();
+        let ws_connected_ws = ws_connected.clone();
+        let ws_state_notify_ws = ws_state_notify.clone();
 
         tokio::spawn(async move {
             let mut ws_failures = 0;
             let max_failures_before_fallback = 3;
 
-            // Discovery candidate list: custom endpoint, container DNS 'boss', mDNS, venue LAN DNS, static VLAN
             let mut candidates = Vec::new();
             if !configured_boss_url.is_empty() {
                 candidates.push(configured_boss_url.clone());
@@ -1170,12 +1318,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut candidate_idx = 0;
 
             loop {
-                let (boss_url, token_for_ws) = {
+                let (boss_url, token_for_ws, node_id_ws, data_dir_ws) = {
                     let state = telemetry_state.read().await;
-                    (state.boss_url.clone(), state.boss_token.clone())
+                    (
+                        state.boss_url.clone(),
+                        state.boss_token.clone(),
+                        state.node_id.clone(),
+                        state.data_dir.clone(),
+                    )
                 };
 
-                let ws_url = format_ws_telemetry_url(&boss_url);
+                let ws_url = format!(
+                    "{}?node_id={}",
+                    format_ws_telemetry_url(&boss_url),
+                    url_encode_query(&node_id_ws)
+                );
 
                 let mut ws_req = match ws_url.as_str().into_client_request() {
                     Ok(req) => req,
@@ -1201,6 +1358,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok((mut ws_stream, _)) => {
                         println!("[✓] WebSocket telemetry connected to {}", ws_url);
                         ws_failures = 0;
+                        ws_connected_ws.store(true, Ordering::Release);
+                        ws_state_notify_ws.notify_waiters();
+
+                        // Sync theme once on WS connect so offline updates apply immediately.
+                        {
+                            let st = telemetry_state.clone();
+                            let cli = telemetry_client.clone();
+                            let boss_http = boss_url.clone();
+                            let ddir = data_dir_ws.clone();
+                            tokio::spawn(async move {
+                                if let Some(theme) = overlay::fetch_theme(&cli, &boss_http).await {
+                                    let changed = st.read().await.theme != theme;
+                                    if changed && overlay::write_cfg(&ddir, &theme).is_ok() {
+                                        let mut guard = st.write().await;
+                                        guard.theme = theme;
+                                        guard.shell.notify_state(&guard);
+                                    }
+                                }
+                            });
+                        }
 
                         loop {
                             let telemetry = {
@@ -1230,30 +1407,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 msg = ws_stream.next() => {
                                     match msg {
                                         Some(Ok(Message::Text(text))) => {
-                                            if let Ok(cmd_val) = serde_json::from_str::<serde_json::Value>(&text) {
-                                                if cmd_val.get("kind").and_then(|v| v.as_str()) == Some("payload_available") {
-                                                    if let Some(filename) = cmd_val.get("filename").and_then(|v| v.as_str()) {
-                                                        println!("[i] Received OTA payload notification: {}", filename);
-                                                        let boss = boss_url.replace("ws://", "http://").replace("wss://", "https://");
-                                                        let filename_owned = filename.to_string();
-                                                        let token_for_ota = token_for_ws.clone();
-                                                        tokio::spawn(async move {
-                                                            if let Err(e) = ota::execute_ota_update(&boss, &filename_owned, &token_for_ota).await {
-                                                                println!("[!] OTA Update failed: {}", e);
+                                            match serde_json::from_str::<WsServerMessage>(&text) {
+                                                Ok(WsServerMessage::Command { record }) => {
+                                                    let st_cmd = telemetry_state.clone();
+                                                    let cli_cmd = telemetry_client.clone();
+                                                    let boss_cmd = boss_url.clone();
+                                                    let tok_cmd = token_for_ws.clone();
+                                                    let nid_cmd = node_id_ws.clone();
+                                                    tokio::spawn(async move {
+                                                        let (success, detail) = execute_cabinet_command(
+                                                            &record.command,
+                                                            &st_cmd,
+                                                            &cli_cmd,
+                                                        )
+                                                        .await;
+                                                        ack_command(
+                                                            &cli_cmd,
+                                                            &boss_cmd,
+                                                            &tok_cmd,
+                                                            &nid_cmd,
+                                                            &record.id,
+                                                            success,
+                                                            detail,
+                                                        )
+                                                        .await;
+                                                    });
+                                                }
+                                                Ok(WsServerMessage::ThemeChanged { theme }) => {
+                                                    if beercade_shared::theme::is_known_theme(&theme) {
+                                                        match overlay::write_cfg(&data_dir_ws, &theme) {
+                                                            Ok(()) => {
+                                                                let mut guard = telemetry_state.write().await;
+                                                                guard.theme = theme;
+                                                                guard.shell.notify_state(&guard);
                                                             }
-                                                        });
+                                                            Err(e) => tracing::warn!("Failed to write overlay config: {e}"),
+                                                        }
                                                     }
+                                                }
+                                                Ok(WsServerMessage::PayloadAvailable { filename, .. }) => {
+                                                    println!("[i] Received OTA payload notification: {}", filename);
+                                                    let boss = boss_url.replace("ws://", "http://").replace("wss://", "https://");
+                                                    let token_for_ota = token_for_ws.clone();
+                                                    let cli_ota = telemetry_client.clone();
+                                                    tokio::spawn(async move {
+                                                        if let Err(e) = ota::execute_ota_update_with_client(
+                                                            &cli_ota,
+                                                            &boss,
+                                                            &filename,
+                                                            &token_for_ota,
+                                                        )
+                                                        .await
+                                                        {
+                                                            println!("[!] OTA Update failed: {}", e);
+                                                        }
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    tracing::debug!("Ignoring unrecognized WS server message: {e}");
                                                 }
                                             }
                                         }
                                         Some(Ok(_)) => {}
-                                        _ => break, // Connection closed or error
+                                        _ => break,
                                     }
                                 }
                             }
                         }
+                        if ws_connected_ws.swap(false, Ordering::AcqRel) {
+                            ws_state_notify_ws.notify_waiters();
+                        }
                     }
                     Err(_e) => {
+                        if ws_connected_ws.swap(false, Ordering::AcqRel) {
+                            ws_state_notify_ws.notify_waiters();
+                        }
                         ws_failures += 1;
                         if ws_failures >= max_failures_before_fallback {
                             let http_url = format_http_telemetry_url(&boss_url);
@@ -1263,6 +1491,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                             let http_res = telemetry_client
                                 .post(&http_url)
+                                .timeout(Duration::from_millis(1500))
                                 .bearer_auth(&token_for_ws)
                                 .json(&telemetry)
                                 .send()
@@ -1353,17 +1582,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // -------------------------------------------------------------------
-    // Command Polling Loop for Game Delivery & Cabinet Directives (BOSS -> Astro)
+    // Command Polling Fallback (runs ONLY while WebSocket is disconnected)
     // -------------------------------------------------------------------
     if !is_standalone {
-        let client_cmd = reqwest::Client::builder()
-            .timeout(Duration::from_millis(3000))
-            .build()?;
+        let client_cmd = shared_client.clone();
         let cmd_state = daemon_state.clone();
+        let ws_connected_cmd = ws_connected.clone();
+        let ws_state_notify_cmd = ws_state_notify.clone();
 
         tokio::spawn(async move {
             loop {
-                sleep(Duration::from_secs(2)).await;
+                if ws_connected_cmd.load(Ordering::Acquire) {
+                    ws_state_notify_cmd.notified().await;
+                    continue;
+                }
+
                 let (boss_url, node_id, boss_token_cmd) = {
                     let st = cmd_state.read().await;
                     (st.boss_url.clone(), st.node_id.clone(), st.boss_token.clone())
@@ -1428,23 +1661,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(2)) => {}
+                    _ = ws_state_notify_cmd.notified() => {}
+                }
             }
         });
 
-        // Periodic check to trigger Attract mode if cabinet is idle without a session
+        // Attract mode arming: emit immediately on boot / session end and retry every 15 s while idle.
         let attract_checker_state = daemon_state.clone();
+        let attract_notify_loop = attract_notify.clone();
         tokio::spawn(async move {
-            // Initial delay after boot before first attract request
-            sleep(Duration::from_secs(3)).await;
             loop {
-                let should_request = {
-                    let st = attract_checker_state.read().await;
-                    st.session.is_none() && !st.attract_running
-                };
+                let should_request = should_request_attract(&*attract_checker_state.read().await);
                 if should_request {
                     post_cabinet_event(&attract_checker_state, &CabinetEvent::AttractNeeded).await;
                 }
-                sleep(Duration::from_secs(15)).await;
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(15)) => {}
+                    _ = attract_notify_loop.notified() => {}
+                }
             }
         });
     }
@@ -1452,17 +1689,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pause menu: cabinet controls -> menu -> RetroArch OSD.
     {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let grab = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        input::spawn_readers(tx, grab.clone());
+        input::spawn_readers(tx, input_grab.clone());
         let menu_state = daemon_state.clone();
+        let ra_menu = shared_ra.clone();
+        let client_menu = shared_client.clone();
+        let grab_menu = input_grab.clone();
+        let game_exit_menu = game_exit_notify.clone();
         let link_peer = std::env::var("ASTRO_NETPLAY_PEER").ok();
         tokio::spawn(async move {
-            use std::sync::atomic::Ordering;
-            let ra = overlay::RetroArch::default();
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(3))
-                .build()
-                .unwrap_or_default();
             let mut menu = overlay::PauseMenu::default();
             // OSD messages fade after a few seconds: redraw while open.
             let mut refresh = tokio::time::interval(Duration::from_secs(2));
@@ -1472,47 +1706,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     _ = refresh.tick() => {
                         if menu.open { overlay::MenuEffect::Redraw } else { overlay::MenuEffect::None }
                     }
+                    _ = game_exit_menu.notified() => {
+                        menu = overlay::PauseMenu::default();
+                        input::set_grab(&grab_menu, false);
+                        continue;
+                    }
                 };
                 match effect {
                     overlay::MenuEffect::None => continue,
                     overlay::MenuEffect::Open => {
-                        // Only over a running game; ES-DE has its own menus.
-                        if ra.is_paused().await.is_none() {
+                        // Only over a non-attract running game.
+                        let can_open = {
+                            let st = menu_state.read().await;
+                            st.active_game.is_some() && !st.attract_running
+                        };
+                        if !can_open {
                             menu.open = false;
+                            input::set_grab(&grab_menu, false);
                             continue;
                         }
-                        grab.store(true, Ordering::Relaxed);
-                        ra.set_paused(true).await;
+                        input::set_grab(&grab_menu, true);
+                        ra_menu.set_paused(true).await;
                     }
                     overlay::MenuEffect::Close => {
-                        grab.store(false, Ordering::Relaxed);
-                        ra.set_paused(false).await;
+                        input::set_grab(&grab_menu, false);
+                        ra_menu.set_paused(false).await;
                         continue;
                     }
                     overlay::MenuEffect::QuitGame => {
-                        grab.store(false, Ordering::Relaxed);
-                        // The exit handler hands the screen back to the shell.
-                        terminate_running_game().await;
+                        input::set_grab(&grab_menu, false);
+                        terminate_running_game(&menu_state).await;
                         continue;
                     }
                     overlay::MenuEffect::EndSession => {
-                        grab.store(false, Ordering::Relaxed);
-                        let mut st = menu_state.write().await;
-                        let fx = st.session.as_mut().map(|s| s.end()).unwrap_or_default();
-                        st.mode = StationMode::Locked {
-                            reason: "Session ended by player".to_string(),
+                        input::set_grab(&grab_menu, false);
+                        let (mut fx, data_dir, attract_notify_menu) = {
+                            let mut st = menu_state.write().await;
+                            let fx = st.session.as_mut().map(|s| s.end()).unwrap_or_default();
+                            st.mode = StationMode::Locked {
+                                reason: "Session ended by player".to_string(),
+                            };
+                            st.shell.notify_state(&st);
+                            (fx, st.data_dir.clone(), st.attract_notify.clone())
                         };
-                        drop(st);
+                        fx.retain(|e| !matches!(e, session::Effect::Wipe));
                         apply_session_effects(&menu_state, fx);
-                        terminate_running_game().await;
-                        resume_frontend().await;
+                        terminate_running_game(&menu_state).await;
+                        let _ = staging::wipe(&staging::session_dir(&data_dir));
+                        staging::wipe_patron_artifacts(&data_dir).await;
+                        resume_frontend(&menu_state).await;
+                        attract_notify_menu.notify_one();
                         continue;
                     }
                     overlay::MenuEffect::CallStaff => {
                         let st = menu_state.read().await.clone();
                         let msg = format!("Staff requested at {}", st.node_id);
                         report_node_error(
-                            &client, &st.boss_url, &st.boss_token, &st.node_id,
+                            &client_menu, &st.boss_url, &st.boss_token, &st.node_id,
                             "warn", "staff_call", &msg, None,
                         )
                         .await;
@@ -1531,36 +1781,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     link_peer: link_peer.as_deref(),
                 });
                 drop(st);
-                ra.show(&line).await;
+                ra_menu.show(&line).await;
             }
         });
     }
 
-    // Keep the overlay's OSD colours on the venue theme set on B.O.S.S.
+    // Theme HTTP fallback: only polls while WS is disconnected (WS pushes ThemeChanged).
     if !is_standalone {
         let theme_state = daemon_state.clone();
         let data_dir = credits_dir.clone();
+        let client_theme = shared_client.clone();
+        let ws_connected_theme = ws_connected.clone();
+        let ws_state_notify_theme = ws_state_notify.clone();
         tokio::spawn(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(3))
-                .build()
-                .unwrap_or_default();
-            let mut current = overlay::DEFAULT_THEME.to_string();
             loop {
-                let boss_url = theme_state.read().await.boss_url.clone();
-                if let Some(theme) = overlay::fetch_theme(&client, &boss_url).await {
+                if ws_connected_theme.load(Ordering::Acquire) {
+                    ws_state_notify_theme.notified().await;
+                    continue;
+                }
+                let (boss_url, current) = {
+                    let st = theme_state.read().await;
+                    (st.boss_url.clone(), st.theme.clone())
+                };
+                if let Some(theme) = overlay::fetch_theme(&client_theme, &boss_url).await {
                     if theme != current {
                         match overlay::write_cfg(&data_dir, &theme) {
                             Ok(()) => {
                                 tracing::info!(theme = %theme, "Overlay theme updated");
-                                theme_state.write().await.theme = theme.clone();
-                                current = theme;
+                                let mut guard = theme_state.write().await;
+                                guard.theme = theme;
+                                guard.shell.notify_state(&guard);
                             }
                             Err(e) => tracing::warn!("Failed to write overlay config: {e}"),
                         }
                     }
                 }
-                sleep(Duration::from_secs(60)).await;
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(60)) => {}
+                    _ = ws_state_notify_theme.notified() => {}
+                }
             }
         });
     }
@@ -1568,11 +1827,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -------------------------------------------------------------------
     // Main supervisor watchdog loop: session countdown & station mode enforcement
     // -------------------------------------------------------------------
-    let ra = overlay::RetroArch::default();
+    let mut tick = interval_at(Instant::now() + Duration::from_secs(1), Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Seconds left in the CONTINUE? window after a session ran out.
     let mut continue_left: Option<u32> = None;
     loop {
-        sleep(Duration::from_secs(1)).await;
+        tick.tick().await;
 
         // B.O.S.S. sessions run on the session state machine.
         let ticked = {
@@ -1600,7 +1860,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some((fx, line)) = ticked {
             apply_session_effects(&daemon_state, fx);
             if let Some(line) = line {
-                ra.show(&line).await;
+                shared_ra.show(&line).await;
             }
             continue;
         }
@@ -1634,26 +1894,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Some(line) = hud {
-            ra.show(&line).await;
+            shared_ra.show(&line).await;
         }
 
         if expired {
-            ra.set_paused(true).await;
+            shared_ra.set_paused(true).await;
             continue_left = Some(overlay::CONTINUE_SECS);
         }
 
         if let Some(left) = continue_left {
             if managed {
                 // More time arrived inside the window: back to the game.
-                ra.set_paused(false).await;
+                shared_ra.set_paused(false).await;
                 continue_left = None;
             } else if left == 0 {
                 continue_left = None;
-                terminate_running_game().await;
-                resume_frontend().await;
+                terminate_running_game(&daemon_state).await;
+                resume_frontend(&daemon_state).await;
             } else {
                 let node_id = daemon_state.read().await.node_id.clone();
-                ra.show(&overlay::continue_line(&node_id, left)).await;
+                shared_ra.show(&overlay::continue_line(&node_id, left)).await;
                 continue_left = Some(left - 1);
             }
         }
@@ -1691,19 +1951,32 @@ mod tests {
     }
 
     pub(crate) fn sample_daemon_state(credits_path: PathBuf) -> DaemonSharedState {
+        let node_id = "test-node-1".to_string();
+        let theme = overlay::DEFAULT_THEME.to_string();
         DaemonSharedState {
-            node_id: "test-node-1".to_string(),
+            node_id: node_id.clone(),
             boss_url: "http://127.0.0.1:8080".to_string(),
             boss_token: "test-token".to_string(),
             mode: StationMode::Standalone,
             credits: CreditCounters::default(),
             active_game: None,
+            active_game_pid: None,
             data_dir: credits_path.parent().map(Path::to_path_buf).unwrap_or_default(),
             credits_path,
             session: None,
             attract_gen: 0,
             attract_running: false,
-            theme: overlay::DEFAULT_THEME.to_string(),
+            theme: theme.clone(),
+            http_client: reqwest::Client::new(),
+            ra: overlay::RetroArch::default(),
+            shell: shell_ipc::ShellPublisher::new(beercade_shared::shell::ShellFrame {
+                node_id,
+                theme,
+                view: beercade_shared::shell::ShellView::Idle,
+            }),
+            game_exit_notify: Arc::new(Notify::new()),
+            attract_notify: Arc::new(Notify::new()),
+            input_grab: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1976,6 +2249,52 @@ mod tests {
                 }
                 other => panic!("Unexpected mode: {:?}", other),
             }
+            assert!(should_request_attract(&guard), "attract mode must re-arm after Ended session");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_end_session_wipes_patron_artifacts_and_session_dir() {
+        let root = FakeRoot::new("end-session-wipe");
+        let data_dir = root.path();
+        let mut st = sample_daemon_state(data_dir.join("credits.json"));
+        st.data_dir = data_dir.to_path_buf();
+        let state = Arc::new(RwLock::new(st));
+        let client = reqwest::Client::new();
+
+        let start_cmd = CabinetCommand::StartSession {
+            session_id: "s-wipe".into(),
+            duration_secs: 60,
+            session_code: "W1".into(),
+            topup_grace_secs: 10,
+            games: Vec::new(),
+        };
+        assert!(execute_cabinet_command(&start_cmd, &state, &client).await.0);
+
+        for dir in [
+            staging::session_dir(data_dir),
+            data_dir.join("saves"),
+            data_dir.join("states"),
+            data_dir.join("screenshots"),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("patron.bin"), b"data").unwrap();
+        }
+
+        let end_cmd = CabinetCommand::EndSession {
+            session_id: Some("s-wipe".into()),
+            reason: None,
+        };
+        assert!(execute_cabinet_command(&end_cmd, &state, &client).await.0);
+
+        for dir in [
+            staging::session_dir(data_dir),
+            data_dir.join("saves"),
+            data_dir.join("states"),
+            data_dir.join("screenshots"),
+        ] {
+            assert!(dir.is_dir());
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "{:?} must be empty", dir);
         }
     }
 

@@ -426,36 +426,43 @@ pub async fn scan_subnets_and_arp(
     }
 
     let total_candidates = candidate_ips.len();
-
     let discovery_secret = discovery_secret_for(state).to_string();
 
-    // 2. Broadcast signed UDP Probe across LAN/broadcast
-    let udp_boss_url = boss_url.clone();
-    let udp_secret = discovery_secret.clone();
-    tokio::spawn(async move {
-        let ts = now_epoch_secs();
-        let Some(sig) = sign_udp_probe(&udp_secret, ts, &udp_boss_url) else {
-            return;
-        };
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await {
-            let _ = socket.set_broadcast(true);
-            let msg = format!(
-                "BEERCADE_PROBE:{}",
-                serde_json::json!({ "boss_url": udp_boss_url, "ts": ts, "sig": sig })
-            );
-            for bcast in &["255.255.255.255:8990", "172.28.0.255:8990", "192.168.100.255:8990"] {
-                if let Ok(addr) = bcast.parse::<SocketAddr>() {
-                    let _ = socket.send_to(msg.as_bytes(), addr).await;
-                }
-            }
-        }
-    });
+    let mut discovered: Vec<DiscoveredNode> = Vec::new();
+    let mut seen_node_ids = HashSet::new();
+    let mut udp_responder_ips = HashSet::new();
 
-    // 3. Concurrently probe candidate hosts (bounded concurrency with tokio Semaphore)
+    // 2. Broadcast signed UDP Probe and collect BEERCADE_NODE_ANNOUNCE replies before HTTP scan.
+    let udp_targets: Vec<SocketAddr> = ["255.255.255.255:8990", "172.28.0.255:8990", "192.168.100.255:8990"]
+        .iter()
+        .filter_map(|s| s.parse::<SocketAddr>().ok())
+        .collect();
+    let udp_nodes = udp_probe_and_collect_announces(
+        &boss_url,
+        &discovery_secret,
+        &udp_targets,
+        Duration::from_millis(400),
+    )
+    .await;
+
+    for mut node in udp_nodes {
+        if seen_node_ids.insert(node.node_id.clone()) {
+            if node.port == ASTRO_DEFAULT_DISCOVERY_PORT {
+                udp_responder_ips.insert(node.ip.clone());
+            }
+            link_discovered_node(&client, &mut node, &boss_url, &discovery_secret, state).await;
+            discovered.push(node);
+        }
+    }
+
+    // 3. Concurrently probe remaining candidate hosts (bounded concurrency with tokio Semaphore)
     let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
     let mut tasks = tokio::task::JoinSet::new();
 
     for host in candidate_ips {
+        if udp_responder_ips.contains(&host) {
+            continue;
+        }
         let sem = semaphore.clone();
         let cl = client.clone();
         tasks.spawn(async move {
@@ -464,30 +471,10 @@ pub async fn scan_subnets_and_arp(
         });
     }
 
-    let mut discovered: Vec<DiscoveredNode> = Vec::new();
-    let mut seen_node_ids = HashSet::new();
-
     while let Some(res) = tasks.join_next().await {
         if let Ok(Some(mut node)) = res {
-            if !seen_node_ids.contains(&node.node_id) {
-                seen_node_ids.insert(node.node_id.clone());
-
-                // Command this node to connect to BOSS
-                if send_connect_directive(
-                    &client,
-                    &node.ip,
-                    node.port,
-                    &boss_url,
-                    &state.config.node_token,
-                    &discovery_secret,
-                )
-                .await
-                .is_ok()
-                {
-                    node.connected = true;
-                    register_initial_node_telemetry(state, &node).await;
-                }
-
+            if seen_node_ids.insert(node.node_id.clone()) {
+                link_discovered_node(&client, &mut node, &boss_url, &discovery_secret, state).await;
                 discovered.push(node);
             }
         }
@@ -514,6 +501,129 @@ pub async fn scan_subnets_and_arp(
         nodes: discovered,
         duration_ms,
         message,
+    }
+}
+
+/// Parse a `BEERCADE_NODE_ANNOUNCE` UDP datagram from an ASTRO node.
+pub fn parse_node_announce(data: &[u8], peer: SocketAddr) -> Option<DiscoveredNode> {
+    let text = std::str::from_utf8(data).ok()?.trim();
+    let prefixed = text.starts_with("BEERCADE_NODE_ANNOUNCE:");
+    let json_str = text
+        .strip_prefix("BEERCADE_NODE_ANNOUNCE:")
+        .unwrap_or(text)
+        .trim();
+    let val: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let event_ok = prefixed
+        || val.get("event").and_then(|v| v.as_str()) == Some("BEERCADE_NODE_ANNOUNCE");
+    if !event_ok {
+        return None;
+    }
+
+    let node_id = val
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let port = val
+        .get("discovery_port")
+        .and_then(|v| v.as_u64())
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or(ASTRO_DEFAULT_DISCOVERY_PORT);
+    let status = val
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("online")
+        .to_string();
+
+    Some(DiscoveredNode {
+        node_id: node_id.to_string(),
+        ip: peer.ip().to_string(),
+        port,
+        status,
+        connected: false,
+        hardware: None,
+        soc: None,
+        mode: None,
+    })
+}
+
+/// Broadcast a signed `BEERCADE_PROBE` and keep the socket open within `budget`
+/// to collect immediate `BEERCADE_NODE_ANNOUNCE` responders.
+pub async fn udp_probe_and_collect_announces(
+    boss_url: &str,
+    discovery_secret: &str,
+    targets: &[SocketAddr],
+    budget: Duration,
+) -> Vec<DiscoveredNode> {
+    let ts = now_epoch_secs();
+    let Some(sig) = sign_udp_probe(discovery_secret, ts, boss_url) else {
+        return Vec::new();
+    };
+    let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
+        return Vec::new();
+    };
+    let _ = socket.set_broadcast(true);
+    let msg = format!(
+        "BEERCADE_PROBE:{}",
+        serde_json::json!({ "boss_url": boss_url, "ts": ts, "sig": sig })
+    );
+    for addr in targets {
+        let _ = socket.send_to(msg.as_bytes(), addr).await;
+    }
+
+    let deadline = Instant::now() + budget;
+    let mut buf = [0u8; 2048];
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        // Once at least one node replies, only linger briefly for siblings so discovery stays sub-150ms.
+        let wait_for = if results.is_empty() {
+            remaining
+        } else {
+            remaining.min(Duration::from_millis(35))
+        };
+
+        match tokio::time::timeout(wait_for, socket.recv_from(&mut buf)).await {
+            Ok(Ok((len, peer))) => {
+                if let Some(node) = parse_node_announce(&buf[..len], peer) {
+                    if seen.insert(node.node_id.clone()) {
+                        results.push(node);
+                    }
+                }
+            }
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    results
+}
+
+async fn link_discovered_node(
+    client: &Client,
+    node: &mut DiscoveredNode,
+    boss_url: &str,
+    discovery_secret: &str,
+    state: &SharedState,
+) {
+    if send_connect_directive(
+        client,
+        &node.ip,
+        node.port,
+        boss_url,
+        &state.config.node_token,
+        discovery_secret,
+    )
+    .await
+    .is_ok()
+    {
+        node.connected = true;
+        register_initial_node_telemetry(state, node).await;
     }
 }
 
@@ -654,5 +764,83 @@ mod tests {
         let (telemetry, _) = nodes.get("MOCK-ASTRO-99").unwrap();
         assert_eq!(telemetry.cpu_temp_c, None);
         assert_eq!(telemetry.gpu_temp_c, None);
+    }
+
+    #[tokio::test]
+    async fn test_udp_node_announce_discovery_fast() {
+        let mock_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let udp_addr = mock_udp.local_addr().unwrap();
+
+        let connect_called = Arc::new(AtomicBool::new(false));
+        let connect_flag = connect_called.clone();
+        let mock_http = Router::new().route(
+            "/api/v1/boss/connect",
+            post(move || {
+                let flag = connect_flag.clone();
+                async move {
+                    flag.store(true, Ordering::SeqCst);
+                    Json(serde_json::json!({ "status": "ok", "message": "Connected" }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_http).await;
+        });
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            if let Ok((len, peer)) = mock_udp.recv_from(&mut buf).await {
+                let text = String::from_utf8_lossy(&buf[..len]);
+                assert!(text.starts_with("BEERCADE_PROBE:"));
+                let reply = serde_json::json!({
+                    "event": "BEERCADE_NODE_ANNOUNCE",
+                    "node_id": "UDP-FAST-01",
+                    "discovery_port": http_port,
+                    "status": "online"
+                })
+                .to_string();
+                let _ = mock_udp.send_to(reply.as_bytes(), peer).await;
+            }
+        });
+
+        let state = Arc::new(crate::state::AppState::new(crate::state::Config {
+            venue_name: "Test".to_string(),
+            venue_address: "123".to_string(),
+            rpc_token: "secret".to_string(),
+            node_token: "node_secret".to_string(),
+            operator_pin: "898900".to_string(),
+            discovery_key: None,
+            trusted_proxies: Vec::new(),
+            edge_ingest_url: None,
+            edge_ingest_token: String::new(),
+        }));
+
+        let start = Instant::now();
+        let mut nodes = udp_probe_and_collect_announces(
+            "http://127.0.0.1:8989",
+            "node_secret",
+            &[udp_addr],
+            Duration::from_millis(400),
+        )
+        .await;
+        let client = Client::new();
+        for node in &mut nodes {
+            link_discovered_node(&client, node, "http://127.0.0.1:8989", "node_secret", &state).await;
+        }
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "UDP announce discovery took {:?} (expected < 150ms)",
+            elapsed
+        );
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id, "UDP-FAST-01");
+        assert_eq!(nodes[0].port, http_port);
+        assert!(nodes[0].connected);
+        assert!(connect_called.load(Ordering::SeqCst));
+        assert!(state.nodes.read().await.contains_key("UDP-FAST-01"));
     }
 }

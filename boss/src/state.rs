@@ -2,10 +2,14 @@
 //! operator session store, plugin registry, and the edge-forwarder buffer.
 
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+use beercade_shared::WsServerMessage;
 use crate::models::{
     CommandRecord, CommandStatus, ErrorEvent, HighScoreEntry, NodeTelemetry, TokenTransaction,
     GameRef, now_epoch_ms,
@@ -296,6 +300,85 @@ impl PinAttemptTracker {
     }
 }
 
+/// Maximum games allowed in a single patron session.
+pub const MAX_SESSION_GAMES: usize = 8;
+
+const SESSION_CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/// Generate a human-friendly `BRC-XXXX` code over 32 unambiguous characters using OS entropy.
+pub fn generate_session_code() -> String {
+    let raw = uuid::Uuid::new_v4();
+    let bytes = raw.as_bytes();
+    let mut code = String::with_capacity(8);
+    code.push_str("BRC-");
+    for &b in &bytes[..4] {
+        code.push(SESSION_CODE_ALPHABET[(b & 0x1F) as usize] as char);
+    }
+    code
+}
+
+/// Normalize a session lookup code (trimmed uppercase).
+pub fn normalize_session_code(code: &str) -> String {
+    code.trim().to_ascii_uppercase()
+}
+
+/// Persistent session store path (`BOSS_SESSIONS_FILE` or `/data/beercade/sessions.json`).
+pub fn sessions_file_path() -> PathBuf {
+    std::env::var("BOSS_SESSIONS_FILE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/data/beercade/sessions.json"))
+}
+
+fn active_sessions_file_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var("BOSS_SESSIONS_FILE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(PathBuf::from(p));
+    }
+    if cfg!(test) {
+        None
+    } else {
+        Some(sessions_file_path())
+    }
+}
+
+fn save_sessions_to_path(
+    path: &Path,
+    sessions: &HashMap<String, ActiveNodeSession>,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let data = serde_json::to_vec_pretty(sessions)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp_name = format!(
+        ".{}.tmp.{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("sessions.json"),
+        uuid::Uuid::new_v4()
+    );
+    let tmp_path = path.with_file_name(tmp_name);
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(&data)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+fn load_sessions_from_path(path: &Path) -> std::io::Result<HashMap<String, ActiveNodeSession>> {
+    let bytes = std::fs::read(path)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// Active player session assigned to a specific cabinet node.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActiveNodeSession {
@@ -304,7 +387,60 @@ pub struct ActiveNodeSession {
     pub duration_secs: u32,
     pub topup_grace_secs: u32,
     pub games: Vec<GameRef>,
+    #[serde(default)]
+    pub started_at_epoch_ms: u64,
     pub expires_at_epoch_ms: u64,
+    #[serde(default)]
+    pub grace_until_epoch_ms: Option<u64>,
+    #[serde(default)]
+    pub in_grace: bool,
+}
+
+/// Public/operator view of an active session with computed remaining timers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveSessionView {
+    pub node_id: String,
+    pub session_id: String,
+    pub session_code: String,
+    pub duration_secs: u32,
+    pub topup_grace_secs: u32,
+    pub games: Vec<GameRef>,
+    pub max_games: usize,
+    pub started_at_epoch_ms: u64,
+    pub expires_at_epoch_ms: u64,
+    pub grace_until_epoch_ms: Option<u64>,
+    pub in_grace: bool,
+    pub remaining_secs: u64,
+    pub grace_remaining_secs: u64,
+}
+
+impl ActiveNodeSession {
+    pub fn to_view(&self, node_id: &str, now_ms: u64) -> ActiveSessionView {
+        let remaining_secs = if self.in_grace {
+            0
+        } else {
+            self.expires_at_epoch_ms.saturating_sub(now_ms) / 1_000
+        };
+        let grace_remaining_secs = self
+            .grace_until_epoch_ms
+            .map(|u| u.saturating_sub(now_ms) / 1_000)
+            .unwrap_or(0);
+        ActiveSessionView {
+            node_id: node_id.to_string(),
+            session_id: self.session_id.clone(),
+            session_code: self.session_code.clone(),
+            duration_secs: self.duration_secs,
+            topup_grace_secs: self.topup_grace_secs,
+            games: self.games.clone(),
+            max_games: MAX_SESSION_GAMES,
+            started_at_epoch_ms: self.started_at_epoch_ms,
+            expires_at_epoch_ms: self.expires_at_epoch_ms,
+            grace_until_epoch_ms: self.grace_until_epoch_ms,
+            in_grace: self.in_grace,
+            remaining_secs,
+            grace_remaining_secs,
+        }
+    }
 }
 
 /// Cabinet session, attract playlist, and attract history tracked per node.
@@ -323,6 +459,11 @@ pub struct AppState {
     pub commands: RwLock<HashMap<String, CommandRecord>>,
     /// Pending (not yet polled) command ids per node, FIFO order.
     pub pending_commands: RwLock<HashMap<String, VecDeque<String>>>,
+    /// Per-node active WebSocket telemetry push channels.
+    pub node_ws_tx: RwLock<HashMap<String, mpsc::Sender<WsServerMessage>>>,
+    /// Monotonic connection generation per node_id so old disconnect tasks cannot remove newer sockets.
+    node_ws_gen: RwLock<HashMap<String, u64>>,
+    next_ws_gen: AtomicU64,
     /// Broadcast bus per SSE channel. Capacity sized for bursty venues.
     pub buses: HashMap<SseChannel, broadcast::Sender<BusMessage>>,
     /// Buffer feeding the Cloudflare edge batcher.
@@ -343,6 +484,8 @@ pub struct AppState {
     pub ui_theme: RwLock<String>,
     pub catalogue: RwLock<crate::catalogue::GameCatalogue>,
     pub node_cabinets: RwLock<HashMap<String, NodeCabinetState>>,
+    /// Uppercase `BRC-XXXX` session code -> `node_id`.
+    pub sessions_by_code: RwLock<HashMap<String, String>>,
 }
 
 impl AppState {
@@ -353,11 +496,41 @@ impl AppState {
             buses.insert(*ch, tx);
         }
 
+        let mut node_cabinets: HashMap<String, NodeCabinetState> = HashMap::new();
+        let mut sessions_by_code: HashMap<String, String> = HashMap::new();
+        if let Some(sess_path) = active_sessions_file_path() {
+            if sess_path.is_file() {
+                match load_sessions_from_path(&sess_path) {
+                    Ok(loaded) => {
+                        for (node_id, mut sess) in loaded {
+                            sess.session_code = normalize_session_code(&sess.session_code);
+                            if !sess.session_code.is_empty() {
+                                sessions_by_code.insert(sess.session_code.clone(), node_id.clone());
+                            }
+                            node_cabinets.insert(
+                                node_id,
+                                NodeCabinetState {
+                                    session: Some(sess),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %sess_path.display(), error = %e, "failed to load persisted sessions");
+                    }
+                }
+            }
+        }
+
         Self {
             config,
             nodes: RwLock::new(HashMap::new()),
             commands: RwLock::new(HashMap::new()),
             pending_commands: RwLock::new(HashMap::new()),
+            node_ws_tx: RwLock::new(HashMap::new()),
+            node_ws_gen: RwLock::new(HashMap::new()),
+            next_ws_gen: AtomicU64::new(1),
             buses,
             edge_buffer: Mutex::new(VecDeque::new()),
             operator_sessions: RwLock::new(HashMap::new()),
@@ -367,8 +540,9 @@ impl AppState {
             recent_transactions: RwLock::new(VecDeque::new()),
             plugins: Arc::new(PluginRegistry::new_with_builtins()),
             ui_theme: RwLock::new(crate::ui_theme::load_initial()),
-            catalogue: RwLock::new(crate::catalogue::GameCatalogue::new()),
-            node_cabinets: RwLock::new(HashMap::new()),
+            catalogue: RwLock::new(crate::catalogue::GameCatalogue::load_or_default()),
+            node_cabinets: RwLock::new(node_cabinets),
+            sessions_by_code: RwLock::new(sessions_by_code),
         }
     }
 
@@ -378,23 +552,208 @@ impl AppState {
         }
     }
 
+    /// Immediately broadcast a fresh venue telemetry snapshot if any `/api/telemetry/stream`
+    /// subscriber is listening to the `venue` channel.
+    pub async fn publish_venue_now(&self) {
+        if self.has_subscribers(SseChannel::Venue) {
+            let report = self.build_venue_report(crate::routes::STALENESS_MS).await;
+            self.publish(SseChannel::Venue, &report);
+        }
+    }
+
+    /// Register a cabinet WebSocket outbound sender, returning its monotonic connection id.
+    pub async fn register_node_ws(
+        &self,
+        node_id: &str,
+        tx: mpsc::Sender<WsServerMessage>,
+    ) -> u64 {
+        let conn_id = self.next_ws_gen.fetch_add(1, Ordering::Relaxed);
+        let mut ws_tx = self.node_ws_tx.write().await;
+        let mut ws_gen = self.node_ws_gen.write().await;
+        ws_tx.insert(node_id.to_string(), tx);
+        ws_gen.insert(node_id.to_string(), conn_id);
+        conn_id
+    }
+
+    /// Unregister a cabinet WebSocket sender ONLY if `conn_id` matches the currently active socket.
+    pub async fn unregister_node_ws(&self, node_id: &str, conn_id: u64) {
+        let mut ws_tx = self.node_ws_tx.write().await;
+        let mut ws_gen = self.node_ws_gen.write().await;
+        if ws_gen.get(node_id).copied() == Some(conn_id) {
+            ws_gen.remove(node_id);
+            ws_tx.remove(node_id);
+        }
+    }
+
+    /// Push a `WsServerMessage` to a single connected cabinet over WS (`try_send`).
+    pub async fn push_to_node_ws(&self, node_id: &str, msg: WsServerMessage) -> bool {
+        let tx_opt = self.node_ws_tx.read().await.get(node_id).cloned();
+        if let Some(tx) = tx_opt {
+            tx.try_send(msg).is_ok()
+        } else {
+            false
+        }
+    }
+
+    /// Broadcast a `WsServerMessage` to every connected cabinet over WS (`try_send`).
+    pub async fn broadcast_ws(&self, msg: WsServerMessage) {
+        let txs: Vec<mpsc::Sender<WsServerMessage>> = {
+            let guard = self.node_ws_tx.read().await;
+            guard.values().cloned().collect()
+        };
+        for tx in txs {
+            let _ = tx.try_send(msg.clone());
+        }
+    }
+
+    /// Generate a unique `BRC-XXXX` code not currently colliding in `sessions_by_code`.
+    pub async fn generate_unique_session_code(&self) -> String {
+        let map = self.sessions_by_code.read().await;
+        for _ in 0..32 {
+            let code = generate_session_code();
+            if !map.contains_key(&code) {
+                return code;
+            }
+        }
+        generate_session_code()
+    }
+
+    async fn persist_sessions(&self) {
+        let Some(path) = active_sessions_file_path() else {
+            return;
+        };
+        let snapshot: HashMap<String, ActiveNodeSession> = {
+            let cabs = self.node_cabinets.read().await;
+            cabs.iter()
+                .filter_map(|(node_id, cab)| cab.session.as_ref().map(|s| (node_id.clone(), s.clone())))
+                .collect()
+        };
+        if let Err(e) = save_sessions_to_path(&path, &snapshot) {
+            tracing::debug!(path = %path.display(), error = %e, "could not persist sessions snapshot");
+        }
+    }
+
     /// Get the current active session for a cabinet node.
     pub async fn get_node_session(&self, node_id: &str) -> Option<ActiveNodeSession> {
         let cabs = self.node_cabinets.read().await;
         cabs.get(node_id).and_then(|c| c.session.clone())
     }
 
-    /// Set an active session for a cabinet node.
-    pub async fn set_node_session(&self, node_id: &str, session: ActiveNodeSession) {
-        let mut cabs = self.node_cabinets.write().await;
-        let entry = cabs.entry(node_id.to_string()).or_default();
-        entry.session = Some(session);
+    /// Set an active session for a cabinet node, updating `sessions_by_code` and `sessions.json`.
+    pub async fn set_node_session(&self, node_id: &str, mut session: ActiveNodeSession) {
+        session.session_code = normalize_session_code(&session.session_code);
+        let old_code = {
+            let mut cabs = self.node_cabinets.write().await;
+            let entry = cabs.entry(node_id.to_string()).or_default();
+            let old = entry.session.as_ref().map(|s| normalize_session_code(&s.session_code));
+            entry.session = Some(session.clone());
+            old
+        };
+        {
+            let mut by_code = self.sessions_by_code.write().await;
+            if let Some(prev) = old_code {
+                if !prev.is_empty() && prev != session.session_code && by_code.get(&prev).map(String::as_str) == Some(node_id) {
+                    by_code.remove(&prev);
+                }
+            }
+            if !session.session_code.is_empty() {
+                by_code.insert(session.session_code.clone(), node_id.to_string());
+            }
+        }
+        self.persist_sessions().await;
     }
 
-    /// Clear and return the active session for a cabinet node.
+    /// Lookup an active session by its `BRC-XXXX` code (case-insensitive, trimmed).
+    pub async fn find_session_by_code(&self, code: &str) -> Option<(String, ActiveNodeSession)> {
+        let norm = normalize_session_code(code);
+        if norm.is_empty() {
+            return None;
+        }
+        let node_id = self.sessions_by_code.read().await.get(&norm).cloned()?;
+        let cabs = self.node_cabinets.read().await;
+        let sess = cabs.get(&node_id).and_then(|c| c.session.clone())?;
+        Some((node_id, sess))
+    }
+
+    /// Update an active session's game list and/or extend time (clearing grace state when time is added).
+    pub async fn update_node_session(
+        &self,
+        code: &str,
+        games: Option<Vec<GameRef>>,
+        add_secs: u32,
+    ) -> Option<(String, ActiveNodeSession)> {
+        let norm = normalize_session_code(code);
+        let node_id = self.sessions_by_code.read().await.get(&norm).cloned()?;
+        let updated = {
+            let mut cabs = self.node_cabinets.write().await;
+            let sess = cabs.get_mut(&node_id).and_then(|c| c.session.as_mut())?;
+            if let Some(new_games) = games {
+                sess.games = new_games;
+            }
+            if add_secs > 0 {
+                let now = now_epoch_ms();
+                let base = sess.expires_at_epoch_ms.max(now);
+                sess.expires_at_epoch_ms = base.saturating_add((add_secs as u64) * 1_000);
+                sess.duration_secs = sess.duration_secs.saturating_add(add_secs);
+                sess.in_grace = false;
+                sess.grace_until_epoch_ms = None;
+            }
+            sess.clone()
+        };
+        self.persist_sessions().await;
+        Some((node_id, updated))
+    }
+
+    /// Transition an active session into its top-up grace window upon `SessionExpired`.
+    pub async fn mark_session_expired(
+        &self,
+        node_id: &str,
+        session_id: &str,
+    ) -> Option<ActiveNodeSession> {
+        let updated = {
+            let mut cabs = self.node_cabinets.write().await;
+            let sess = cabs.get_mut(node_id).and_then(|c| c.session.as_mut())?;
+            if !session_id.is_empty() && sess.session_id != session_id {
+                return None;
+            }
+            let now = now_epoch_ms();
+            sess.in_grace = true;
+            sess.grace_until_epoch_ms = Some(now.saturating_add((sess.topup_grace_secs as u64) * 1_000));
+            sess.clone()
+        };
+        self.persist_sessions().await;
+        Some(updated)
+    }
+
+    /// Clear and return the active session for a cabinet node (also removing from `sessions_by_code`).
     pub async fn clear_node_session(&self, node_id: &str) -> Option<ActiveNodeSession> {
-        let mut cabs = self.node_cabinets.write().await;
-        cabs.get_mut(node_id).and_then(|c| c.session.take())
+        let taken = {
+            let mut cabs = self.node_cabinets.write().await;
+            cabs.get_mut(node_id).and_then(|c| c.session.take())
+        };
+        if let Some(ref sess) = taken {
+            let norm = normalize_session_code(&sess.session_code);
+            if !norm.is_empty() {
+                let mut by_code = self.sessions_by_code.write().await;
+                if by_code.get(&norm).map(String::as_str) == Some(node_id) {
+                    by_code.remove(&norm);
+                }
+            }
+            self.persist_sessions().await;
+        }
+        taken
+    }
+
+    /// List all currently active cabinet sessions sorted by node_id.
+    pub async fn list_active_sessions(&self) -> Vec<ActiveSessionView> {
+        let now = now_epoch_ms();
+        let cabs = self.node_cabinets.read().await;
+        let mut views: Vec<ActiveSessionView> = cabs
+            .iter()
+            .filter_map(|(node_id, cab)| cab.session.as_ref().map(|s| s.to_view(node_id, now)))
+            .collect();
+        views.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        views
     }
 
     /// Get current attract playlist for a cabinet node.
@@ -498,29 +857,43 @@ impl AppState {
         list.push_front(tx);
     }
 
-    /// Queue a command for a node, track it, and notify the commands bus.
+    /// Queue a command for a node, pushing immediately via WS if connected or buffering
+    /// in `pending_commands` for HTTP poll / WS reconnect flush.
     pub async fn enqueue_command(
         &self,
         node_id: &str,
         command: crate::models::CabinetCommand,
     ) -> CommandRecord {
-        let record = CommandRecord {
+        let now = now_epoch_ms();
+        let mut record = CommandRecord {
             id: uuid::Uuid::new_v4().to_string(),
             node_id: node_id.to_string(),
             command,
             status: CommandStatus::Queued,
-            issued_at_epoch_ms: now_epoch_ms(),
+            issued_at_epoch_ms: now,
             dispatched_at_epoch_ms: None,
             completed_at_epoch_ms: None,
             result: None,
         };
 
-        self.pending_commands
-            .write()
+        let mut ws_record = record.clone();
+        ws_record.status = CommandStatus::Dispatched;
+        ws_record.dispatched_at_epoch_ms = Some(now);
+
+        if self
+            .push_to_node_ws(node_id, WsServerMessage::Command { record: ws_record.clone() })
             .await
-            .entry(node_id.to_string())
-            .or_default()
-            .push_back(record.id.clone());
+        {
+            record = ws_record;
+        } else {
+            self.pending_commands
+                .write()
+                .await
+                .entry(node_id.to_string())
+                .or_default()
+                .push_back(record.id.clone());
+        }
+
         self.commands
             .write()
             .await
@@ -744,5 +1117,80 @@ mod tests {
             res,
             PinFailureResult::Invalid { remaining_attempts: 4 }
         );
+    }
+
+    fn test_state() -> AppState {
+        AppState::new(Config {
+            venue_name: "Test".into(),
+            venue_address: "123".into(),
+            rpc_token: "rpc".into(),
+            node_token: "node".into(),
+            operator_pin: "123456".into(),
+            discovery_key: None,
+            trusted_proxies: Vec::new(),
+            edge_ingest_url: None,
+            edge_ingest_token: String::new(),
+        })
+    }
+
+    #[test]
+    fn test_generate_session_code_format() {
+        for _ in 0..32 {
+            let code = generate_session_code();
+            assert_eq!(code.len(), 8);
+            assert!(code.starts_with("BRC-"));
+            for ch in code[4..].bytes() {
+                assert!(SESSION_CODE_ALPHABET.contains(&ch));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ws_generation_guard_prevents_stale_unregister() {
+        let state = test_state();
+        let (tx1, mut rx1) = mpsc::channel(8);
+        let (tx2, mut rx2) = mpsc::channel(8);
+
+        let g1 = state.register_node_ws("CAB-01", tx1).await;
+        let g2 = state.register_node_ws("CAB-01", tx2).await;
+        assert_ne!(g1, g2);
+
+        // Old socket exits and attempts unregister with stale generation g1
+        state.unregister_node_ws("CAB-01", g1).await;
+        assert!(state.push_to_node_ws("CAB-01", WsServerMessage::ThemeChanged { theme: "vector".into() }).await);
+        assert!(rx1.try_recv().is_err());
+        assert!(matches!(rx2.try_recv(), Ok(WsServerMessage::ThemeChanged { theme }) if theme == "vector"));
+
+        // Current socket unregisters cleanly
+        state.unregister_node_ws("CAB-01", g2).await;
+        assert!(!state.push_to_node_ws("CAB-01", WsServerMessage::ThemeChanged { theme: "pinball".into() }).await);
+    }
+
+    #[tokio::test]
+    async fn test_session_persistence_roundtrip_file() {
+        let tmp_dir = std::env::temp_dir().join(format!("boss-sess-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let path = tmp_dir.join("sessions.json");
+
+        let mut map = HashMap::new();
+        map.insert(
+            "CAB-99".to_string(),
+            ActiveNodeSession {
+                session_id: "sess_abc".into(),
+                session_code: "BRC-ABCD".into(),
+                duration_secs: 1800,
+                topup_grace_secs: 90,
+                games: Vec::new(),
+                started_at_epoch_ms: 1_000,
+                expires_at_epoch_ms: 1_801_000,
+                grace_until_epoch_ms: None,
+                in_grace: false,
+            },
+        );
+        save_sessions_to_path(&path, &map).unwrap();
+        let loaded = load_sessions_from_path(&path).unwrap();
+        assert_eq!(loaded.get("CAB-99").unwrap().session_code, "BRC-ABCD");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

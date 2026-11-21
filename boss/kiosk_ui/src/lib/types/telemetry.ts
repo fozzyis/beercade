@@ -1,7 +1,9 @@
 export * from '../../../../../shared/proto/telemetry';
 import type {
+	CabinetEvent,
 	CommandRecord,
 	ErrorEvent,
+	GameRef,
 	HighScoreEntry,
 	NodeTelemetry,
 	TokenTransaction
@@ -65,7 +67,56 @@ export interface AdminOverview {
 		buffered_items: number;
 	};
 	plugins: PluginDescriptor[];
+	active_sessions?: ActiveSessionSummary[];
+	catalogue_count?: { total: number; enabled: number };
 	generated_at_epoch_ms: number;
+}
+
+export interface CatalogueGame extends GameRef {
+	enabled?: boolean;
+}
+
+export interface ActiveSessionSummary {
+	session_id: string;
+	session_code: string;
+	node_id: string;
+	patron_name?: string | null;
+	games: GameRef[];
+	max_games?: number;
+	in_grace?: boolean;
+	remaining_secs?: number;
+	grace_remaining_secs?: number;
+	started_at_epoch_ms: number;
+	expires_at_epoch_ms: number;
+	grace_until_epoch_ms?: number | null;
+	topup_grace_secs?: number;
+	status?: string;
+}
+
+export interface SessionLookupResponse {
+	ok: boolean;
+	session_id?: string;
+	session_code?: string;
+	node_id?: string;
+	games?: GameRef[];
+	max_games?: number;
+	in_grace?: boolean;
+	remaining_secs?: number;
+	grace_remaining_secs?: number;
+	expires_at_epoch_ms?: number;
+	grace_until_epoch_ms?: number | null;
+	started_at_epoch_ms?: number;
+	error?: string;
+	detail?: string;
+}
+
+export interface CabinetAlertEvent {
+	kind: 'cabinet_event';
+	node_id: string;
+	session_code?: string;
+	grace_until_epoch_ms?: number | null;
+	at_epoch_ms: number;
+	event: CabinetEvent;
 }
 
 export interface NetplayEndpointHealth {

@@ -3,7 +3,7 @@ Description=A.S.T.R.O. node daemon
 After=network.target local-fs.target astro-tune.service
 
 [Service]
-Type=simple
+Type=notify
 Environment=ASTRO_STANDALONE=0
 EnvironmentFile=-/data/beercade/astro.env
 ExecStart=/usr/bin/astro-daemon

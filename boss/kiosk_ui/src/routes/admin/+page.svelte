@@ -4,30 +4,41 @@
 	import PinKeypadModal from '$lib/components/PinKeypadModal.svelte';
 	import {
 		cabinetAddCredits,
+		cabinetEndSession,
 		cabinetLaunchGame,
 		cabinetPing,
 		cabinetReboot,
 		discoverFleetNodes,
+		endSession,
+		fetchAdminGames,
 		fetchAdminOverview,
 		fetchNetworkInterfaces,
 		fetchNetplaySessions,
 		fetchOtaPayloads,
 		forceConnectNode,
-		getApiBase,
 		getStoredOperatorToken,
+		importAdminGames,
 		invokePluginAction,
 		logoutOperator,
 		registerWebhookPlugin,
+		subscribeBossEvents,
+		toggleAdminGame,
 		togglePlugin,
 		type DiscoveredNode,
 		type DiscoveryReport,
 		type NetworkInterfacesReport
 	} from '$lib/bossApi';
 	import type {
+		ActiveSessionSummary,
 		AdminOverview,
+		CabinetAlertEvent,
+		CatalogueGame,
+		CommandRecord,
 		NetplaySessionSummary,
+		NodeTelemetry,
 		OtaPayloadEntry,
-		PluginDescriptor
+		PluginDescriptor,
+		VenueTelemetryReport
 	} from '$lib/types/telemetry';
 	import { THEMES, currentTheme, setVenueTheme } from '$lib/theme/themes';
 
@@ -39,9 +50,16 @@
 	let simulatedMode = $state(false);
 	let netplaySessions = $state<NetplaySessionSummary[]>([]);
 	let otaPayloads = $state<OtaPayloadEntry[]>([]);
-	let activeTab = $state<'fleet' | 'plugins' | 'netplay_ota' | 'audit'>('fleet');
+	let adminGames = $state<CatalogueGame[]>([]);
+	let romsDir = $state<string>('/data/beercade/roms');
+	let romImportDir = $state<string>('');
+	let romSearch = $state<string>('');
+	let romSystemFilter = $state<string>('ALL');
+	let isImportingRoms = $state<boolean>(false);
+	let activeTab = $state<'fleet' | 'plugins' | 'netplay_ota' | 'audit' | 'catalogue'>('fleet');
 	let selectedPluginId = $state<string>('pos-payments');
 	let idleSecondsRemaining = $state<number>(IDLE_LOCK_SECONDS);
+	let nowMs = $state<number>(Date.now());
 	let toastMessage = $state<string>('');
 	let liveSseEvents = $state<Array<{ channel: string; summary: string; at: string }>>([]);
 	let venueTheme = $state<string>(currentTheme());
@@ -112,6 +130,29 @@
 			overview?.plugins?.[0]
 	);
 
+	let activeSessions = $derived<ActiveSessionSummary[]>(overview?.active_sessions ?? []);
+	let catalogueSystems = $derived<string[]>([
+		'ALL',
+		...Array.from(new Set(adminGames.map((g) => g.system).filter(Boolean)))
+	]);
+	let filteredAdminGames = $derived<CatalogueGame[]>(
+		adminGames.filter((g) => {
+			if (romSystemFilter !== 'ALL' && g.system !== romSystemFilter) return false;
+			const q = romSearch.trim().toLowerCase();
+			if (!q) return true;
+			return (
+				g.title.toLowerCase().includes(q) ||
+				g.file_name.toLowerCase().includes(q) ||
+				g.system.toLowerCase().includes(q) ||
+				g.core.toLowerCase().includes(q)
+			);
+		})
+	);
+	let enabledGamesCount = $derived(
+		overview?.catalogue_count?.enabled ?? adminGames.filter((g) => g.enabled !== false).length
+	);
+	let totalGamesCount = $derived(overview?.catalogue_count?.total ?? adminGames.length);
+
 	function showToast(msg: string) {
 		toastMessage = msg;
 		setTimeout(() => {
@@ -123,12 +164,38 @@
 		idleSecondsRemaining = IDLE_LOCK_SECONDS;
 	}
 
+	function formatBytes(bytes: number): string {
+		if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+		const mib = bytes / (1024 * 1024);
+		return mib >= 1 ? `${mib.toFixed(1)} MiB` : `${Math.round(bytes / 1024)} KiB`;
+	}
+
+	function formatCountdownSecs(secs: number): string {
+		const s = Math.max(0, Math.floor(secs));
+		const mins = Math.floor(s / 60);
+		const rem = s % 60;
+		return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+	}
+
+	async function loadCatalogue() {
+		const res = await fetchAdminGames();
+		adminGames = res.games;
+		romsDir = res.roms_dir;
+	}
+
 	async function refreshAll() {
-		const res = await fetchAdminOverview();
+		const [res, netplay, ota, cat] = await Promise.all([
+			fetchAdminOverview(),
+			fetchNetplaySessions(),
+			fetchOtaPayloads(),
+			fetchAdminGames()
+		]);
 		overview = res.overview;
 		simulatedMode = res.simulated;
-		netplaySessions = await fetchNetplaySessions();
-		otaPayloads = await fetchOtaPayloads();
+		netplaySessions = netplay;
+		otaPayloads = ota;
+		adminGames = cat.games;
+		romsDir = cat.roms_dir;
 		const alertPlugin = res.overview.plugins.find((p) => p.manifest.id === 'alerting-sinks');
 		if (alertPlugin?.state?.thermal_warn_temp_c) {
 			thermalThresholdInput = alertPlugin.state.thermal_warn_temp_c;
@@ -141,6 +208,60 @@
 				forceConnectBossUrl = rep.default_boss_url;
 			}
 		});
+	}
+
+	async function handleEndActiveSession(sess: ActiveSessionSummary) {
+		let res = await cabinetEndSession(sess.node_id);
+		if (!res.ok && sess.session_code) {
+			res = await endSession(sess.session_code);
+		}
+		if (res.ok) {
+			if (overview) {
+				overview.active_sessions = (overview.active_sessions ?? []).filter(
+					(s) => s.session_id !== sess.session_id && s.node_id !== sess.node_id
+				);
+			}
+			showToast(`✓ Ended session ${sess.session_code} on ${sess.node_id}`);
+		} else {
+			showToast(`✕ ${res.error || 'Could not end session'}`);
+		}
+	}
+
+	async function handleToggleAdminGame(game: CatalogueGame) {
+		const nextEnabled = !(game.enabled ?? true);
+		const res = await toggleAdminGame(game.game_id, nextEnabled);
+		if (res.ok) {
+			adminGames = adminGames.map((g) =>
+				g.game_id === game.game_id ? { ...(res.game ?? g), enabled: nextEnabled } : g
+			);
+			if (overview) {
+				overview.catalogue_count = {
+					total: adminGames.length,
+					enabled: adminGames.filter((g) => g.enabled !== false).length
+				};
+			}
+			showToast(`${game.title} ${nextEnabled ? 'ENABLED' : 'DISABLED'}`);
+		} else {
+			showToast(`✕ ${res.error || 'Failed to toggle game'}`);
+		}
+	}
+
+	async function handleImportRoms() {
+		isImportingRoms = true;
+		const res = await importAdminGames(romImportDir);
+		isImportingRoms = false;
+		if (res.ok) {
+			adminGames = res.games;
+			if (overview) {
+				overview.catalogue_count = {
+					total: res.games.length,
+					enabled: res.games.filter((g) => g.enabled !== false).length
+				};
+			}
+			showToast(`✓ Imported ${res.imported} new ROM(s) (${res.total} total in catalogue)`);
+		} else {
+			showToast(`✕ ${res.error || 'ROM import failed'}`);
+		}
 	}
 
 	async function handleForceConnect(e?: SubmitEvent) {
@@ -284,6 +405,7 @@
 		activityEvents.forEach((ev) => window.addEventListener(ev, resetIdleTimer));
 
 		const timer = setInterval(() => {
+			nowMs = Date.now();
 			if (!authenticated) return;
 			idleSecondsRemaining -= 1;
 			if (idleSecondsRemaining <= 0) {
@@ -291,35 +413,148 @@
 			}
 		}, 1000);
 
-		let es: EventSource | null = null;
-		try {
-			es = new EventSource(
-				`${getApiBase()}/api/telemetry/stream?channels=venue,alerts,commands,plugins`
-			);
-			for (const ch of ['venue', 'alerts', 'commands', 'plugins']) {
-				es.addEventListener(ch, (ev) => {
-					const raw = (ev as MessageEvent).data;
-					if (ch !== 'venue') {
-						liveSseEvents = [
-							{
-								channel: ch.toUpperCase(),
-								summary: raw.slice(0, 140),
-								at: new Date().toLocaleTimeString()
-							},
-							...liveSseEvents.slice(0, 29)
-						];
-						refreshAll();
-					}
-				});
+		let overviewSyncTimer: ReturnType<typeof setTimeout> | null = null;
+		let netplaySyncTimer: ReturnType<typeof setTimeout> | null = null;
+		let otaSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+		const scheduleOverviewSync = () => {
+			if (!authenticated || overviewSyncTimer) return;
+			overviewSyncTimer = setTimeout(async () => {
+				overviewSyncTimer = null;
+				const res = await fetchAdminOverview();
+				overview = res.overview;
+				simulatedMode = res.simulated;
+			}, 750);
+		};
+
+		const scheduleNetplaySync = () => {
+			if (!authenticated || netplaySyncTimer) return;
+			netplaySyncTimer = setTimeout(async () => {
+				netplaySyncTimer = null;
+				netplaySessions = await fetchNetplaySessions();
+			}, 750);
+		};
+
+		const scheduleOtaSync = () => {
+			if (!authenticated || otaSyncTimer) return;
+			otaSyncTimer = setTimeout(async () => {
+				otaSyncTimer = null;
+				otaPayloads = await fetchOtaPayloads();
+			}, 750);
+		};
+
+		const unsub = subscribeBossEvents(['venue', 'alerts', 'commands', 'plugins'], (ch, data) => {
+			if (ch === 'venue') {
+				if (overview && data && Array.isArray(data.nodes)) {
+					const rep = data as VenueTelemetryReport;
+					const ts = rep.generated_at_epoch_ms ?? Date.now();
+					const prevMap = new Map(overview.nodes.map((n) => [n.telemetry.node_id, n]));
+					overview.nodes = rep.nodes.map((t: NodeTelemetry) => {
+						const prev = prevMap.get(t.node_id);
+						const ageMs = Math.max(0, ts - (t.timestamp_epoch_ms ?? ts));
+						return {
+							telemetry: t,
+							last_seen_epoch_ms: t.timestamp_epoch_ms ?? prev?.last_seen_epoch_ms ?? ts,
+							age_ms: ageMs,
+							online: ageMs < 15_000
+						};
+					});
+					overview.nodes_online = rep.nodes_online ?? overview.nodes.filter((n) => n.online).length;
+					overview.generated_at_epoch_ms = ts;
+				}
+				return;
 			}
-		} catch {
-			// SSE optional when offline
-		}
+
+			liveSseEvents = [
+				{
+					channel: ch.toUpperCase(),
+					summary: JSON.stringify(data).slice(0, 140),
+					at: new Date().toLocaleTimeString()
+				},
+				...liveSseEvents.slice(0, 29)
+			];
+
+			if (ch === 'plugins' && overview) {
+				if (Array.isArray(data?.plugins)) {
+					overview.plugins = data.plugins;
+				} else if (data?.manifest?.id) {
+					const idx = overview.plugins.findIndex((p) => p.manifest.id === data.manifest.id);
+					if (idx >= 0) {
+						overview.plugins[idx] = data as PluginDescriptor;
+					} else {
+						overview.plugins = [...overview.plugins, data as PluginDescriptor];
+					}
+				}
+			} else if (ch === 'commands' && overview) {
+				const rec: CommandRecord | null = data?.record?.id
+					? data.record
+					: data?.id && data?.node_id && data?.command
+						? (data as CommandRecord)
+						: null;
+				if (rec) {
+					const idx = overview.commands.findIndex((c) => c.id === rec.id);
+					if (idx >= 0) {
+						overview.commands[idx] = rec;
+					} else {
+						overview.commands = [rec, ...overview.commands.slice(0, 49)];
+					}
+				}
+			} else if (ch === 'alerts') {
+				if (data?.kind === 'cabinet_event') {
+					const alert = data as CabinetAlertEvent;
+					const ev = alert.event;
+					if (ev.type === 'session_ended' && overview) {
+						overview.active_sessions = (overview.active_sessions ?? []).filter(
+							(s) =>
+								s.session_id !== ev.session_id &&
+								(!alert.session_code || s.session_code !== alert.session_code)
+						);
+						showToast(`Session ${alert.session_code || ev.session_id} ended on ${alert.node_id}`);
+					} else if (ev.type === 'session_expired' && overview) {
+						overview.active_sessions = (overview.active_sessions ?? []).map((s) =>
+							s.session_id === ev.session_id ||
+							(alert.session_code && s.session_code === alert.session_code)
+								? {
+										...s,
+										in_grace: true,
+										remaining_secs: 0,
+										grace_until_epoch_ms: alert.grace_until_epoch_ms ?? s.grace_until_epoch_ms
+									}
+								: s
+						);
+						showToast(
+							`⏱️ Session ${alert.session_code || ev.session_id} expired on ${alert.node_id} (grace window)`
+						);
+					} else if (ev.type === 'session_staged') {
+						showToast(
+							`✓ Staged ${ev.ready_game_ids.length} game(s) on ${alert.node_id}${ev.failed_game_ids.length ? ` (${ev.failed_game_ids.length} failed)` : ''}`
+						);
+						scheduleOverviewSync();
+					} else if (ev.type === 'change_requested') {
+						showToast(`🎮 Game swap requested on ${alert.node_id}`);
+						scheduleOverviewSync();
+					}
+				} else if (data?.score && data?.initials && overview) {
+					overview.scores = [data, ...overview.scores.slice(0, 49)];
+					showToast(`🏆 New score: ${data.initials} — ${Number(data.score).toLocaleString()} on ${data.node_id}`);
+				} else if (data?.level && data?.message && overview) {
+					overview.errors = [data, ...overview.errors.slice(0, 49)];
+					showToast(`⚠️ [${String(data.level).toUpperCase()}] ${data.node_id ?? ''}: ${data.message}`);
+				} else if (data?.kind === 'netplay' || data?.session_id) {
+					scheduleNetplaySync();
+				} else if (data?.kind === 'payload_available' || data?.kind === 'sync') {
+					scheduleOtaSync();
+				}
+			}
+		});
 
 		return () => {
 			activityEvents.forEach((ev) => window.removeEventListener(ev, resetIdleTimer));
 			clearInterval(timer);
-			es?.close();
+			if (overviewSyncTimer) clearTimeout(overviewSyncTimer);
+			if (netplaySyncTimer) clearTimeout(netplaySyncTimer);
+			if (otaSyncTimer) clearTimeout(otaSyncTimer);
+			unsub();
 		};
 	});
 </script>
@@ -399,6 +634,11 @@
 				<small>OR Protocol P2P Arbiter</small>
 			</div>
 			<div class="kpi-card">
+				<span class="kpi-label">ACTIVE SESSIONS / CATALOGUE</span>
+				<strong class="kpi-val">{activeSessions.length} LIVE SESSIONS</strong>
+				<small>{enabledGamesCount} / {totalGamesCount} ROMs enabled</small>
+			</div>
+			<div class="kpi-card">
 				<span class="kpi-label">CLOUDFLARE D1 EDGE</span>
 				<strong class="kpi-val">
 					{overview.edge_sync.enabled ? 'CONNECTED' : 'LOCAL ONLY'}
@@ -437,12 +677,83 @@
 			>
 				4. EVENT BUS & ERROR LOG
 			</button>
+			<button
+				type="button"
+				class="tab-btn {activeTab === 'catalogue' ? 'active' : ''}"
+				onclick={() => {
+					activeTab = 'catalogue';
+					if (adminGames.length === 0) loadCatalogue();
+				}}
+			>
+				5. ROM CATALOGUE ({enabledGamesCount}/{totalGamesCount})
+			</button>
 		</nav>
 
 		<!-- =================================================================== -->
 		<!-- TAB 1: FLEET & CABINET RPC CONTROL                                  -->
 		<!-- =================================================================== -->
 		{#if activeTab === 'fleet'}
+			<!-- Active BRC-XXXX Timed Sessions Panel -->
+			<section class="sub-box active-sessions-box">
+				<div class="sub-head-flex" style="margin-bottom: 0.65rem;">
+					<h3 style="margin: 0;">ACTIVE B.R.C. TIMED SESSIONS ({activeSessions.length})</h3>
+					<small style="color: var(--text-muted);">
+						Real-time A.S.T.R.O. session codes, staged games, and expiry / grace countdowns
+					</small>
+				</div>
+
+				{#if activeSessions.length === 0}
+					<div class="empty-sessions-note">
+						No active timed cabinet sessions right now.
+					</div>
+				{:else}
+					<div class="sessions-grid">
+						{#each activeSessions as sess}
+							{@const remSecs = Math.max(0, Math.ceil((sess.expires_at_epoch_ms - nowMs) / 1000))}
+							{@const graceSecs = sess.grace_until_epoch_ms
+								? Math.max(0, Math.ceil((sess.grace_until_epoch_ms - nowMs) / 1000))
+								: (sess.grace_remaining_secs ?? 0)}
+							{@const inGrace = Boolean(sess.in_grace || (remSecs <= 0 && graceSecs > 0))}
+							<div class="session-row-card {inGrace ? 'grace' : ''}">
+								<div class="session-row-top">
+									<div class="inline-controls">
+										<strong class="session-code-badge">{sess.session_code}</strong>
+										<span class="node-badge-pill">{sess.node_id}</span>
+										{#if sess.patron_name}
+											<small style="color: var(--text-soft);">{sess.patron_name}</small>
+										{/if}
+									</div>
+									<div class="inline-controls">
+										{#if inGrace}
+											<span class="grace-countdown-pill">
+												GRACE: {formatCountdownSecs(graceSecs)}
+											</span>
+										{:else}
+											<span class="time-countdown-pill">
+												{formatCountdownSecs(remSecs)} LEFT
+											</span>
+										{/if}
+										<button
+											type="button"
+											class="action-btn danger small"
+											onclick={() => handleEndActiveSession(sess)}
+										>
+											END SESSION
+										</button>
+									</div>
+								</div>
+								<div class="session-games-row">
+									{#each sess.games ?? [] as g}
+										<span class="event-pill">{g.title} ({g.system})</span>
+									{:else}
+										<small style="color: var(--text-faint);">Default station rotation</small>
+									{/each}
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</section>
 			<!-- Empty Fleet Notice -->
 			{#if overview.nodes.length === 0}
 				<div class="empty-fleet-alert">
@@ -1503,6 +1814,96 @@
 					{/each}
 				</div>
 			</div>
+
+		<!-- =================================================================== -->
+		<!-- TAB 5: ROM CATALOGUE MANAGEMENT                                     -->
+		<!-- =================================================================== -->
+		{:else if activeTab === 'catalogue'}
+			<section class="sub-box">
+				<div class="catalogue-header">
+					<div>
+						<h3 style="margin: 0 0 0.25rem 0;">
+							A.S.T.R.O. ROM CATALOGUE ({enabledGamesCount} / {totalGamesCount} ENABLED)
+						</h3>
+						<small style="color: var(--text-muted);">
+							ROMs Directory: <code>{romsDir}</code>
+						</small>
+					</div>
+					<div class="inline-controls">
+						<input
+							type="text"
+							placeholder={`Optional folder override (default: ${romsDir})`}
+							bind:value={romImportDir}
+							style="min-width: 260px;"
+						/>
+						<button
+							type="button"
+							class="action-btn primary {isImportingRoms ? 'busy' : ''}"
+							disabled={isImportingRoms}
+							onclick={handleImportRoms}
+						>
+							{isImportingRoms ? '⏳ IMPORTING...' : '📂 IMPORT ROMS FROM FOLDER'}
+						</button>
+						<button type="button" class="action-btn" onclick={loadCatalogue}>
+							↻ RELOAD
+						</button>
+					</div>
+				</div>
+
+				<div class="catalogue-filters">
+					<input
+						type="text"
+						placeholder="Search title, filename, system, or core..."
+						bind:value={romSearch}
+						style="min-width: 260px;"
+					/>
+					<div class="inline-controls">
+						{#each catalogueSystems as sys}
+							<button
+								type="button"
+								class="action-btn small {romSystemFilter === sys ? 'primary' : ''}"
+								onclick={() => (romSystemFilter = sys)}
+							>
+								{sys}
+							</button>
+						{/each}
+					</div>
+				</div>
+
+				{#if filteredAdminGames.length === 0}
+					<div class="empty-sessions-note">
+						No ROMs match your filter. Click <strong>IMPORT ROMS FROM FOLDER</strong> to scan <code>{romsDir}</code>.
+					</div>
+				{:else}
+					<div class="catalogue-list">
+						{#each filteredAdminGames as game}
+							{@const isEnabled = game.enabled !== false}
+							<div class="list-item-row catalogue-row {isEnabled ? '' : 'disabled-game'}">
+								<div>
+									<div class="inline-controls">
+										<strong>{game.title}</strong>
+										<span class="event-pill">{game.system}</span>
+										<span class="event-pill">{game.core}</span>
+									</div>
+									<small>
+										File: <code>{game.file_name}</code> · Size: {formatBytes(game.size_bytes)} ·
+										SHA-256: <code title={game.sha256}>{game.sha256 ? `${game.sha256.slice(0, 16)}...` : '—'}</code>
+									</small>
+								</div>
+								<div class="inline-controls">
+									<button
+										type="button"
+										class="toggle-pill {isEnabled ? 'on' : 'off'}"
+										onclick={() => handleToggleAdminGame(game)}
+									>
+										{isEnabled ? 'ENABLED' : 'DISABLED'}
+									</button>
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</section>
 		{/if}
 	{/if}
 </div>
@@ -2522,5 +2923,121 @@
 		.panel-grid-2 {
 			grid-template-columns: 1fr;
 		}
+	}
+
+	/* Wave 3C: Active BRC-XXXX Sessions & ROM Catalogue styles */
+	.active-sessions-box {
+		margin-bottom: 1.25rem;
+	}
+
+	.empty-sessions-note {
+		padding: 0.9rem 1rem;
+		border-radius: 8px;
+		border: 1px dashed var(--border);
+		background: var(--inset);
+		color: var(--text-muted);
+		font-size: 0.8rem;
+	}
+
+	.sessions-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+		gap: 0.75rem;
+	}
+
+	.session-row-card {
+		background: var(--inset);
+		border: 1px solid var(--border-strong);
+		border-radius: 10px;
+		padding: 0.85rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.55rem;
+	}
+
+	.session-row-card.grace {
+		border-color: var(--warn);
+		background: rgba(var(--warn-rgb), 0.1);
+	}
+
+	.session-row-top {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.session-code-badge {
+		font-family: var(--font-data);
+		font-size: 0.95rem;
+		letter-spacing: 0.08em;
+		color: var(--accent);
+		background: rgba(var(--accent-rgb), 0.12);
+		border: 1px solid rgba(var(--accent-rgb), 0.4);
+		padding: 0.2rem 0.55rem;
+		border-radius: 6px;
+	}
+
+	.node-badge-pill {
+		font-size: 0.74rem;
+		font-weight: 800;
+		color: var(--text-strong);
+	}
+
+	.time-countdown-pill {
+		font-family: var(--font-data);
+		font-size: 0.74rem;
+		font-weight: 800;
+		padding: 0.2rem 0.55rem;
+		border-radius: 6px;
+		background: rgba(var(--good-rgb), 0.16);
+		color: var(--good);
+	}
+
+	.grace-countdown-pill {
+		font-family: var(--font-data);
+		font-size: 0.74rem;
+		font-weight: 800;
+		padding: 0.2rem 0.55rem;
+		border-radius: 6px;
+		background: rgba(var(--warn-rgb), 0.2);
+		color: var(--warn);
+	}
+
+	.session-games-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+	}
+
+	.catalogue-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.85rem;
+		margin-bottom: 1rem;
+		padding-bottom: 0.85rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.catalogue-filters {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+		margin-bottom: 1rem;
+	}
+
+	.catalogue-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+	}
+
+	.catalogue-row.disabled-game {
+		opacity: 0.6;
 	}
 </style>

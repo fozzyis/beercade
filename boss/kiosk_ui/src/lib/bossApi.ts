@@ -1,12 +1,16 @@
 import type {
+	ActiveSessionSummary,
 	AdminOverview,
+	CatalogueGame,
 	CommandRecord,
 	CommandStatus,
+	GameRef,
 	NetplaySessionSummary,
 	NodeTelemetry,
 	OtaPayloadEntry,
 	PluginDescriptor,
 	PluginManifest,
+	SessionLookupResponse,
 	VenueTelemetryReport
 } from '$lib/types/telemetry';
 
@@ -912,6 +916,11 @@ export async function fetchAdminOverview(): Promise<{
 				buffered_items: 0
 			},
 			plugins: buildFallbackPlugins(),
+			active_sessions: [],
+			catalogue_count: {
+				total: buildFallbackCatalogue().length,
+				enabled: buildFallbackCatalogue().filter((g) => g.enabled !== false).length
+			},
 			generated_at_epoch_ms: now
 		}
 	};
@@ -1249,4 +1258,293 @@ export async function fetchNetworkInterfaces(): Promise<NetworkInterfacesReport>
 		interfaces: [],
 		default_boss_url: 'http://boss:8989'
 	};
+}
+
+// ---------------------------------------------------------------------------
+// ROM Catalogue & Patron Session Management APIs (Wave 3)
+// ---------------------------------------------------------------------------
+
+function buildFallbackCatalogue(): CatalogueGame[] {
+	return [
+		{
+			game_id: 'sfiii3',
+			title: 'Street Fighter III: 3rd Strike',
+			system: 'CPS-3',
+			core: 'fbneo_libretro',
+			file_name: 'sfiii3.zip',
+			size_bytes: 71_303_168,
+			sha256: '4a6c2f0c8a1f3e9b5c4d2e1a9f8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b',
+			artwork_url: null,
+			enabled: true
+		},
+		{
+			game_id: 'mvc2',
+			title: 'Marvel vs. Capcom 2',
+			system: 'NAOMI',
+			core: 'flycast_libretro',
+			file_name: 'mvc2.zip',
+			size_bytes: 192_937_984,
+			sha256: '9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c',
+			artwork_url: null,
+			enabled: true
+		},
+		{
+			game_id: 'mslugx',
+			title: 'Metal Slug X',
+			system: 'Neo-Geo MVS',
+			core: 'fbneo_libretro',
+			file_name: 'mslugX.zip',
+			size_bytes: 34_603_008,
+			sha256: '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b',
+			artwork_url: null,
+			enabled: true
+		},
+		{
+			game_id: 'wjammers',
+			title: 'Windjammers',
+			system: 'Neo-Geo MVS',
+			core: 'fbneo_libretro',
+			file_name: 'wjammers.zip',
+			size_bytes: 12_582_912,
+			sha256: '2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c',
+			artwork_url: null,
+			enabled: true
+		},
+		{
+			game_id: 'tmnt2',
+			title: 'TMNT: Turtles in Time',
+			system: 'Arcade',
+			core: 'mame2003_plus',
+			file_name: 'tmnt2.zip',
+			size_bytes: 8_388_608,
+			sha256: '3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d',
+			artwork_url: null,
+			enabled: true
+		},
+		{
+			game_id: 'orunners',
+			title: 'OutRunners',
+			system: 'Arcade',
+			core: 'mame2003_plus',
+			file_name: 'orunners.zip',
+			size_bytes: 16_777_216,
+			sha256: '4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e',
+			artwork_url: null,
+			enabled: true
+		}
+	];
+}
+
+export async function fetchGames(): Promise<CatalogueGame[]> {
+	try {
+		const res = await fetch(`${getApiBase()}/api/v1/games`);
+		if (res.ok) {
+			const data = await res.json();
+			return Array.isArray(data?.games) ? data.games : [];
+		}
+	} catch {
+		// Fall through to offline catalogue preview
+	}
+	return buildFallbackCatalogue().filter((g) => g.enabled !== false);
+}
+
+export async function fetchAdminGames(): Promise<{
+	games: CatalogueGame[];
+	roms_dir: string;
+	simulated?: boolean;
+}> {
+	try {
+		const res = await fetch(`${getApiBase()}/api/v1/admin/games`, {
+			headers: authHeaders()
+		});
+		if (res.ok) {
+			const data = await res.json();
+			return {
+				games: Array.isArray(data?.games) ? data.games : [],
+				roms_dir: data?.roms_dir ?? '/data/beercade/roms',
+				simulated: false
+			};
+		}
+	} catch {
+		// Fall through to offline fallback
+	}
+	return {
+		games: buildFallbackCatalogue(),
+		roms_dir: '/data/beercade/roms',
+		simulated: true
+	};
+}
+
+export async function toggleAdminGame(
+	gameId: string,
+	enabled: boolean
+): Promise<{ ok: boolean; game?: CatalogueGame; error?: string }> {
+	try {
+		const res = await fetch(
+			`${getApiBase()}/api/v1/admin/games/${encodeURIComponent(gameId)}/toggle`,
+			{
+				method: 'POST',
+				headers: authHeaders(),
+				body: JSON.stringify({ enabled })
+			}
+		);
+		const data = await res.json().catch(() => ({}));
+		if (res.ok && data?.ok) {
+			return { ok: true, game: data.game };
+		}
+		return {
+			ok: false,
+			error: data?.error || data?.detail || `Failed to toggle game (${res.status})`
+		};
+	} catch {
+		const fallback = buildFallbackCatalogue().find((g) => g.game_id === gameId);
+		return {
+			ok: true,
+			game: fallback ? { ...fallback, enabled } : undefined
+		};
+	}
+}
+
+export async function importAdminGames(
+	dir?: string
+): Promise<{ ok: boolean; imported: number; total: number; games: CatalogueGame[]; error?: string }> {
+	try {
+		const res = await fetch(`${getApiBase()}/api/v1/admin/games/import`, {
+			method: 'POST',
+			headers: authHeaders(),
+			body: JSON.stringify(dir?.trim() ? { dir: dir.trim() } : {})
+		});
+		const data = await res.json().catch(() => ({}));
+		if (res.ok && data?.ok) {
+			return {
+				ok: true,
+				imported: Number(data.imported ?? 0),
+				total: Number(data.total ?? (data.games?.length ?? 0)),
+				games: Array.isArray(data.games) ? data.games : []
+			};
+		}
+		return {
+			ok: false,
+			imported: 0,
+			total: 0,
+			games: [],
+			error: data?.error || data?.detail || `ROM import failed (${res.status})`
+		};
+	} catch {
+		const games = buildFallbackCatalogue();
+		return {
+			ok: true,
+			imported: 0,
+			total: games.length,
+			games
+		};
+	}
+}
+
+export async function lookupSession(code: string): Promise<SessionLookupResponse> {
+	const normalized = code.trim().toUpperCase();
+	if (!normalized) {
+		return { ok: false, error: 'Please enter your BRC-XXXX session code.' };
+	}
+	try {
+		const res = await fetch(`${getApiBase()}/api/v1/sessions/${encodeURIComponent(normalized)}`);
+		const data = await res.json().catch(() => ({}));
+		if (res.ok && data?.ok) {
+			return data as SessionLookupResponse;
+		}
+		return {
+			ok: false,
+			error:
+				data?.error ||
+				data?.detail ||
+				(res.status === 404
+					? `Session code ${normalized} was not found or has already ended.`
+					: `Lookup failed (${res.status}).`)
+		};
+	} catch {
+		return {
+			ok: false,
+			error: 'B.O.S.S. server unreachable — cannot look up active session offline.'
+		};
+	}
+}
+
+export async function updateSession(
+	code: string,
+	payload: { games?: GameRef[]; game_ids?: string[]; add_secs?: number }
+): Promise<{ ok: boolean; session?: ActiveSessionSummary; error?: string }> {
+	const normalized = code.trim().toUpperCase();
+	if (!normalized) {
+		return { ok: false, error: 'Missing session code.' };
+	}
+	try {
+		const res = await fetch(
+			`${getApiBase()}/api/v1/sessions/${encodeURIComponent(normalized)}/update`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			}
+		);
+		const data = await res.json().catch(() => ({}));
+		if (res.ok && data?.ok) {
+			return { ok: true, session: data.session };
+		}
+		return {
+			ok: false,
+			error:
+				data?.error ||
+				data?.detail ||
+				(res.status === 404
+					? `Session code ${normalized} not found or expired.`
+					: `Could not update session (${res.status}).`)
+		};
+	} catch {
+		return {
+			ok: false,
+			error: 'B.O.S.S. server unreachable — cannot update session offline.'
+		};
+	}
+}
+
+export async function endSession(code: string): Promise<{ ok: boolean; error?: string }> {
+	const normalized = code.trim().toUpperCase();
+	try {
+		const res = await fetch(
+			`${getApiBase()}/api/v1/sessions/${encodeURIComponent(normalized)}/end`,
+			{
+				method: 'POST',
+				headers: authHeaders()
+			}
+		);
+		const data = await res.json().catch(() => ({}));
+		if (res.ok && (data?.ok ?? true)) {
+			return { ok: true };
+		}
+		return { ok: false, error: data?.error || data?.detail || `End session failed (${res.status})` };
+	} catch {
+		return { ok: true };
+	}
+}
+
+export async function cabinetEndSession(nodeId: string): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const res = await fetch(
+			`${getApiBase()}/api/v1/cabinet/${encodeURIComponent(nodeId)}/end_session`,
+			{
+				method: 'POST',
+				headers: authHeaders()
+			}
+		);
+		const data = await res.json().catch(() => ({}));
+		if (res.ok && (data?.ok ?? true)) {
+			return { ok: true };
+		}
+		return {
+			ok: false,
+			error: data?.error || data?.detail || `Cabinet end_session failed (${res.status})`
+		};
+	} catch {
+		return { ok: true };
+	}
 }

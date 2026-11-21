@@ -53,6 +53,7 @@ async fn venue_broadcaster(state: Arc<AppState>) {
                     "at_epoch_ms": now,
                 }),
             );
+            state.publish_venue_now().await;
             state
                 .plugins
                 .dispatch_event(
@@ -118,6 +119,30 @@ async fn main() {
 
     tokio::spawn(venue_broadcaster(state.clone()));
     tokio::spawn(edge::run_edge_forwarder(state.clone()));
+
+    let roms_dir = catalogue::roms_dir();
+    if roms_dir.is_dir() {
+        let scan_state = state.clone();
+        tokio::spawn(async move {
+            match catalogue::scan_and_merge_into_state(&scan_state, &roms_dir).await {
+                Ok((imported, total)) => {
+                    tracing::info!(
+                        dir = %roms_dir.display(),
+                        imported,
+                        total,
+                        "startup ROM catalogue scan complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        dir = %roms_dir.display(),
+                        error = %e,
+                        "startup ROM catalogue scan failed"
+                    );
+                }
+            }
+        });
+    }
 
     // Netplay discovery relay + telemetry arbiter (UDP forwarding plane).
     let relay_state = Arc::new(netplay_relay::RelayState::new());

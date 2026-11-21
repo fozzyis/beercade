@@ -8,32 +8,36 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
 use serde_json::json;
 
+pub use beercade_shared::theme::{AVAILABLE_THEMES, DEFAULT_THEME, is_known_theme};
+use beercade_shared::WsServerMessage;
+
 use crate::auth::RequireRpcToken;
 use crate::state::{SharedState, SseChannel};
 
-/// Theme ids the kiosk bundle ships tokens for. Keep in sync with
-/// `kiosk_ui/src/lib/theme/themes.ts`.
-pub const AVAILABLE_THEMES: &[&str] = &["taproom", "vector", "bigsky", "pinball", "classic"];
-pub const DEFAULT_THEME: &str = "taproom";
-
-fn theme_file() -> String {
-    std::env::var("BOSS_UI_THEME_FILE").unwrap_or_else(|_| "/data/beercade/state/ui_theme".to_string())
-}
-
-fn is_known(theme: &str) -> bool {
-    AVAILABLE_THEMES.contains(&theme)
+fn theme_file() -> Option<String> {
+    if let Ok(val) = std::env::var("BOSS_UI_THEME_FILE") {
+        let trimmed = val.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    if cfg!(test) {
+        None
+    } else {
+        Some("/data/beercade/state/ui_theme".to_string())
+    }
 }
 
 /// Initial theme: persisted file, then `BOSS_UI_THEME`, then the default.
 pub fn load_initial() -> String {
-    let from_file = std::fs::read_to_string(theme_file())
-        .ok()
+    let from_file = theme_file()
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string());
     let from_env = std::env::var("BOSS_UI_THEME").ok().map(|s| s.trim().to_string());
     from_file
         .into_iter()
         .chain(from_env)
-        .find(|t| is_known(t))
+        .find(|t| is_known_theme(t))
         .unwrap_or_else(|| DEFAULT_THEME.to_string())
 }
 
@@ -67,7 +71,7 @@ pub async fn set_theme(
     Json(req): Json<SetThemeRequest>,
 ) -> impl IntoResponse {
     let theme = req.theme.trim().to_string();
-    if !is_known(&theme) {
+    if !is_known_theme(&theme) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "unknown_theme", "available": AVAILABLE_THEMES })),
@@ -75,14 +79,20 @@ pub async fn set_theme(
     }
 
     *state.ui_theme.write().await = theme.clone();
-    let path = theme_file();
-    if let Some(dir) = std::path::Path::new(&path).parent() {
-        let _ = tokio::fs::create_dir_all(dir).await;
-    }
-    if let Err(e) = tokio::fs::write(&path, format!("{theme}\n")).await {
-        tracing::warn!(error = %e, "could not persist UI theme; it will reset on restart");
+    if let Some(path) = theme_file() {
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            let _ = tokio::fs::create_dir_all(dir).await;
+        }
+        if let Err(e) = tokio::fs::write(&path, format!("{theme}\n")).await {
+            tracing::warn!(error = %e, "could not persist UI theme; it will reset on restart");
+        }
     }
     state.publish(SseChannel::Ui, &json!({ "kind": "theme_changed", "theme": theme }));
+    state
+        .broadcast_ws(WsServerMessage::ThemeChanged {
+            theme: theme.clone(),
+        })
+        .await;
 
     (StatusCode::OK, Json(json!({ "theme": theme })))
 }

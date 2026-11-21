@@ -122,6 +122,7 @@ pub async fn ingest_telemetry(
                 "at_epoch_ms": now,
             }),
         );
+        state.publish_venue_now().await;
         state
             .plugins
             .dispatch_event(
@@ -364,6 +365,11 @@ pub async fn get_admin_overview(
         .collect();
     let edge_backlog_len = state.edge_buffer.lock().await.len();
     let plugins = state.plugins.list_descriptors().await;
+    let active_sessions = state.list_active_sessions().await;
+    let (cat_total, cat_enabled) = {
+        let cat = state.catalogue.read().await;
+        (cat.len(), cat.enabled_count())
+    };
 
     Json(json!({
         "venue": report.venue,
@@ -375,6 +381,11 @@ pub async fn get_admin_overview(
         "errors": errors,
         "scores": scores,
         "transactions": transactions,
+        "active_sessions": active_sessions,
+        "catalogue_count": {
+            "total": cat_total,
+            "enabled": cat_enabled,
+        },
         "edge_sync": {
             "enabled": state.config.edge_ingest_url.is_some(),
             "endpoint": state.config.edge_ingest_url,
@@ -631,6 +642,7 @@ pub async fn cabinet_launch_game(
             },
         )
         .await;
+    state.publish_venue_now().await;
     tracing::info!(node_id = %node_id, command_id = %record.id, "launch_game queued");
     Json(command_accepted(&record))
 }
@@ -681,6 +693,7 @@ pub async fn credits_add(
         .dispatch_event(PluginEvent::CreditTransaction(tx.clone()), &state)
         .await;
     state.buffer_edge_item(EdgeItem::Transaction(tx)).await;
+    state.publish_venue_now().await;
     tracing::info!(node_id = %node_id, command_id = %record.id, credits = req.credits, "credits queued");
 
     Json(json!({
@@ -1071,7 +1084,10 @@ pub async fn cabinet_game_file(
                 )
                     .into_response();
             }
-            let stream = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(file, len));
+            let stream = tokio_util::io::ReaderStream::with_capacity(
+                tokio::io::AsyncReadExt::take(file, len),
+                1_048_576,
+            );
             let body = axum::body::Body::from_stream(stream);
             tracing::info!(
                 node_id = %node_id,
@@ -1095,7 +1111,7 @@ pub async fn cabinet_game_file(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         RangeSpec::Full => {
-            let stream = tokio_util::io::ReaderStream::new(file);
+            let stream = tokio_util::io::ReaderStream::with_capacity(file, 1_048_576);
             let body = axum::body::Body::from_stream(stream);
             tracing::info!(
                 node_id = %node_id,
@@ -1123,6 +1139,9 @@ pub async fn cabinet_events(
     Json(event): Json<CabinetEvent>,
 ) -> impl IntoResponse {
     tracing::info!(node_id = %node_id, event = ?event, "received cabinet event");
+    let now = now_epoch_ms();
+    let mut session_code: Option<String> = None;
+    let mut grace_until_epoch_ms: Option<u64> = None;
 
     match &event {
         CabinetEvent::AttractNeeded => {
@@ -1144,6 +1163,15 @@ pub async fn cabinet_events(
                 }
             }
         }
+        CabinetEvent::SessionExpired { session_id } => {
+            if let Some(expired) = state.mark_session_expired(&node_id, session_id).await {
+                session_code = Some(expired.session_code);
+                grace_until_epoch_ms = expired.grace_until_epoch_ms;
+            }
+        }
+        CabinetEvent::ChangeRequested { session_id: _ } | CabinetEvent::SessionStaged { .. } => {
+            session_code = state.get_node_session(&node_id).await.map(|s| s.session_code);
+        }
         CabinetEvent::SessionEnded { session_id, files_wiped } => {
             tracing::info!(
                 node_id = %node_id,
@@ -1151,6 +1179,7 @@ pub async fn cabinet_events(
                 files_wiped = %files_wiped,
                 "session ended, clearing node session and scheduling attract mode"
             );
+            session_code = state.get_node_session(&node_id).await.map(|s| s.session_code);
             state.clear_node_session(&node_id).await;
             let recent = state.get_node_recent_attract_ids(&node_id).await;
             let games = state.catalogue.read().await.pick_attract_games(&recent);
@@ -1167,29 +1196,423 @@ pub async fn cabinet_events(
                     .await;
             }
         }
-        _ => {}
+        _ => {
+            session_code = state.get_node_session(&node_id).await.map(|s| s.session_code);
+        }
+    }
+
+    let sse_payload = json!({
+        "kind": "cabinet_event",
+        "node_id": node_id,
+        "session_code": session_code,
+        "grace_until_epoch_ms": grace_until_epoch_ms,
+        "event": &event,
+        "at_epoch_ms": now,
+    });
+    state.publish(SseChannel::Alerts, &sse_payload);
+    state.publish(SseChannel::Ui, &sse_payload);
+    state.publish_venue_now().await;
+
+    (StatusCode::OK, Json(json!({ "ok": true, "node_id": node_id })))
+}
+
+// ---------------------------------------------------------------------------
+// Admin Catalogue Management & Customer BRC-XXXX Session API
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct AdminCatalogueGameView {
+    #[serde(flatten)]
+    pub game: GameRef,
+    pub enabled: bool,
+    pub on_disk: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ToggleGameRequest {
+    pub enabled: bool,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ImportGamesRequest {
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateSessionRequest {
+    #[serde(default)]
+    pub games: Option<Vec<GameRef>>,
+    #[serde(default)]
+    pub game_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub add_secs: u32,
+}
+
+fn build_admin_catalogue_views(cat: &crate::catalogue::GameCatalogue) -> Vec<AdminCatalogueGameView> {
+    cat.list_all()
+        .into_iter()
+        .map(|entry| {
+            let on_disk = cat.resolve_rom_path(&entry.game.file_name).is_some();
+            AdminCatalogueGameView {
+                game: entry.game,
+                enabled: entry.enabled,
+                on_disk,
+            }
+        })
+        .collect()
+}
+
+/// GET /api/v1/admin/games — full catalogue view (including disabled entries & on-disk check).
+pub async fn admin_list_games(
+    State(state): State<SharedState>,
+    _auth: RequireRpcToken,
+) -> Json<Value> {
+    let games = {
+        let cat = state.catalogue.read().await;
+        build_admin_catalogue_views(&cat)
+    };
+    let roms_dir = crate::catalogue::roms_dir().to_string_lossy().to_string();
+    Json(json!({
+        "games": games,
+        "roms_dir": roms_dir,
+    }))
+}
+
+/// POST /api/v1/admin/games/:game_id/toggle — enable or disable a catalogue game.
+pub async fn admin_toggle_game(
+    State(state): State<SharedState>,
+    _auth: RequireRpcToken,
+    Path(game_id): Path<String>,
+    Json(req): Json<ToggleGameRequest>,
+) -> Response {
+    let (updated_view, snapshot) = {
+        let mut cat = state.catalogue.write().await;
+        if !cat.set_enabled(&game_id, req.enabled) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "game_not_found", "game_id": game_id })),
+            )
+                .into_response();
+        }
+        let entry = cat.get(&game_id).cloned().expect("set_enabled returned true");
+        let on_disk = cat.resolve_rom_path(&entry.game.file_name).is_some();
+        let view = AdminCatalogueGameView {
+            game: entry.game,
+            enabled: entry.enabled,
+            on_disk,
+        };
+        (view, cat.clone())
+    };
+
+    if let Err(e) = tokio::task::spawn_blocking(move || snapshot.save_to_default())
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+    {
+        tracing::debug!(error = %e, "could not persist toggled catalogue");
     }
 
     state.publish(
-        SseChannel::Alerts,
-        &json!({
-            "kind": "cabinet_event",
-            "node_id": node_id,
-            "event": &event,
-            "at_epoch_ms": now_epoch_ms(),
-        }),
-    );
-    state.publish(
         SseChannel::Ui,
         &json!({
-            "kind": "cabinet_event",
-            "node_id": node_id,
-            "event": &event,
+            "kind": "catalogue_updated",
+            "game_id": game_id,
+            "enabled": req.enabled,
             "at_epoch_ms": now_epoch_ms(),
         }),
     );
 
-    (StatusCode::OK, Json(json!({ "ok": true, "node_id": node_id })))
+    (StatusCode::OK, Json(json!({ "ok": true, "game": updated_view }))).into_response()
+}
+
+/// POST /api/v1/admin/games/import — scan ROM directory, hash files, and merge into catalogue.
+pub async fn admin_import_games(
+    State(state): State<SharedState>,
+    _auth: RequireRpcToken,
+    body: Option<Json<ImportGamesRequest>>,
+) -> Response {
+    let target_dir = body
+        .and_then(|Json(req)| req.dir)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::catalogue::roms_dir);
+
+    match crate::catalogue::scan_and_merge_into_state(&state, &target_dir).await {
+        Ok((imported, total)) => {
+            let games = {
+                let cat = state.catalogue.read().await;
+                build_admin_catalogue_views(&cat)
+            };
+            state.publish(
+                SseChannel::Ui,
+                &json!({
+                    "kind": "catalogue_updated",
+                    "imported": imported,
+                    "total": total,
+                    "at_epoch_ms": now_epoch_ms(),
+                }),
+            );
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "imported": imported,
+                    "total": total,
+                    "games": games,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": "import_failed",
+                "detail": e.to_string(),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/sessions/:code — public patron-safe session lookup by `BRC-XXXX`.
+pub async fn get_session_by_code(
+    State(state): State<SharedState>,
+    Path(code): Path<String>,
+) -> Response {
+    let Some((node_id, sess)) = state.find_session_by_code(&code).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "ok": false,
+                "error": "session_not_found",
+                "session_code": crate::state::normalize_session_code(&code),
+            })),
+        )
+            .into_response();
+    };
+    let view = sess.to_view(&node_id, now_epoch_ms());
+    let mut val = serde_json::to_value(&view).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("ok".to_string(), json!(true));
+    }
+    (StatusCode::OK, Json(val)).into_response()
+}
+
+/// POST /api/v1/sessions/:code/update — public patron-safe game swap & time top-up.
+pub async fn update_session_by_code(
+    State(state): State<SharedState>,
+    Path(code): Path<String>,
+    Json(req): Json<UpdateSessionRequest>,
+) -> Response {
+    if state.find_session_by_code(&code).await.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "ok": false,
+                "error": "session_not_found",
+                "session_code": crate::state::normalize_session_code(&code),
+            })),
+        )
+            .into_response();
+    }
+
+    let resolved_games: Option<Vec<GameRef>> = if let Some(ids) = req.game_ids {
+        if ids.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "empty_games", "detail": "Select at least one game." })),
+            )
+                .into_response();
+        }
+        if ids.len() > crate::state::MAX_SESSION_GAMES {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "too_many_games", "max_games": crate::state::MAX_SESSION_GAMES })),
+            )
+                .into_response();
+        }
+        let cat = state.catalogue.read().await;
+        let mut list = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(entry) = cat.get(id.trim()).filter(|e| e.enabled) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "ok": false, "error": "invalid_game", "game_id": id })),
+                )
+                    .into_response();
+            };
+            list.push(entry.game.clone());
+        }
+        Some(list)
+    } else if let Some(games) = req.games {
+        if games.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "empty_games", "detail": "Select at least one game." })),
+            )
+                .into_response();
+        }
+        if games.len() > crate::state::MAX_SESSION_GAMES {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "too_many_games", "max_games": crate::state::MAX_SESSION_GAMES })),
+            )
+                .into_response();
+        }
+        let cat = state.catalogue.read().await;
+        let mut list = Vec::with_capacity(games.len());
+        for g in games {
+            let Some(entry) = cat.get(g.game_id.trim()).filter(|e| e.enabled) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "ok": false, "error": "invalid_game", "game_id": g.game_id })),
+                )
+                    .into_response();
+            };
+            list.push(entry.game.clone());
+        }
+        Some(list)
+    } else {
+        None
+    };
+
+    if resolved_games.is_none() && req.add_secs == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": "no_changes",
+                "detail": "Provide 'games', 'game_ids', or positive 'add_secs'."
+            })),
+        )
+            .into_response();
+    }
+
+    let Some((node_id, updated)) = state
+        .update_node_session(&code, resolved_games.clone(), req.add_secs)
+        .await
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "session_not_found" })),
+        )
+            .into_response();
+    };
+
+    state
+        .enqueue_command(
+            &node_id,
+            CabinetCommand::UpdateSession {
+                session_id: updated.session_id.clone(),
+                games: resolved_games,
+                add_secs: req.add_secs,
+            },
+        )
+        .await;
+
+    let now = now_epoch_ms();
+    state.publish(
+        SseChannel::Ui,
+        &json!({
+            "kind": "session_updated",
+            "node_id": node_id,
+            "session_code": updated.session_code,
+            "session_id": updated.session_id,
+            "at_epoch_ms": now,
+        }),
+    );
+    state.publish_venue_now().await;
+
+    let view = updated.to_view(&node_id, now);
+    (StatusCode::OK, Json(json!({ "ok": true, "session": view }))).into_response()
+}
+
+/// POST /api/v1/sessions/:code/end — operator-authenticated force end by `BRC-XXXX` code.
+pub async fn end_session_by_code(
+    State(state): State<SharedState>,
+    _auth: RequireRpcToken,
+    Path(code): Path<String>,
+) -> Response {
+    let Some((node_id, sess)) = state.find_session_by_code(&code).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "ok": false,
+                "error": "session_not_found",
+                "session_code": crate::state::normalize_session_code(&code),
+            })),
+        )
+            .into_response();
+    };
+
+    state
+        .enqueue_command(
+            &node_id,
+            CabinetCommand::EndSession {
+                session_id: Some(sess.session_id.clone()),
+                reason: Some("operator_ended".to_string()),
+            },
+        )
+        .await;
+    state.clear_node_session(&node_id).await;
+
+    state.publish(
+        SseChannel::Ui,
+        &json!({
+            "kind": "session_ended",
+            "node_id": node_id,
+            "session_code": sess.session_code,
+            "session_id": sess.session_id,
+            "at_epoch_ms": now_epoch_ms(),
+        }),
+    );
+    state.publish_venue_now().await;
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "node_id": node_id,
+            "session_code": sess.session_code,
+            "session_id": sess.session_id,
+        })),
+    )
+        .into_response()
+}
+
+/// POST /api/v1/cabinet/:node_id/end_session — operator-authenticated force end by cabinet `node_id`.
+pub async fn cabinet_end_session(
+    State(state): State<SharedState>,
+    _auth: RequireRpcToken,
+    Path(node_id): Path<String>,
+) -> Response {
+    let sess = state.get_node_session(&node_id).await;
+    state
+        .enqueue_command(
+            &node_id,
+            CabinetCommand::EndSession {
+                session_id: sess.as_ref().map(|s| s.session_id.clone()),
+                reason: Some("operator_ended".to_string()),
+            },
+        )
+        .await;
+    state.clear_node_session(&node_id).await;
+
+    state.publish(
+        SseChannel::Ui,
+        &json!({
+            "kind": "session_ended",
+            "node_id": node_id,
+            "session_code": sess.as_ref().map(|s| s.session_code.clone()),
+            "session_id": sess.as_ref().map(|s| s.session_id.clone()),
+            "at_epoch_ms": now_epoch_ms(),
+        }),
+    );
+    state.publish_venue_now().await;
+
+    (StatusCode::OK, Json(json!({ "ok": true, "node_id": node_id }))).into_response()
 }
 
 /// Construct the complete Axum Router for B.O.S.S. Server.
@@ -1238,6 +1661,13 @@ pub fn build_router_with_relay(
         .route("/api/v1/commands/:command_id", axum::routing::get(command_status))
         // Game catalogue & file delivery
         .route("/api/v1/games", axum::routing::get(list_catalogue_games))
+        .route("/api/v1/admin/games", axum::routing::get(admin_list_games))
+        .route("/api/v1/admin/games/import", axum::routing::post(admin_import_games))
+        .route("/api/v1/admin/games/:game_id/toggle", axum::routing::post(admin_toggle_game))
+        .route("/api/v1/sessions/:code", axum::routing::get(get_session_by_code))
+        .route("/api/v1/sessions/:code/update", axum::routing::post(update_session_by_code))
+        .route("/api/v1/sessions/:code/end", axum::routing::post(end_session_by_code))
+        .route("/api/v1/cabinet/:node_id/end_session", axum::routing::post(cabinet_end_session))
         .route("/api/v1/cabinet/:node_id/games/:game_id/file", axum::routing::get(cabinet_game_file))
         .route("/api/v1/cabinet/:node_id/events", axum::routing::post(cabinet_events))
         // Node command plane
@@ -2130,7 +2560,10 @@ mod tests {
                 duration_secs: 3600,
                 topup_grace_secs: 90,
                 games: vec![game],
+                started_at_epoch_ms: now_epoch_ms(),
                 expires_at_epoch_ms: now_epoch_ms() + 3600_000,
+                grace_until_epoch_ms: None,
+                in_grace: false,
             },
         ).await;
 
@@ -2237,7 +2670,10 @@ mod tests {
                 duration_secs: 1800,
                 topup_grace_secs: 90,
                 games: Vec::new(),
+                started_at_epoch_ms: now_epoch_ms(),
                 expires_at_epoch_ms: now_epoch_ms() + 1800_000,
+                grace_until_epoch_ms: None,
+                in_grace: false,
             },
         ).await;
 
@@ -2265,5 +2701,460 @@ mod tests {
         // Verify attract playlist generated
         let attract_games = state.get_node_attract_playlist(node_id).await;
         assert_eq!(attract_games.len(), 3);
+    }
+
+    async fn ws_connect(
+        addr: SocketAddr,
+        path_and_query: &str,
+        bearer_token: &str,
+    ) -> (tokio::net::TcpStream, Vec<u8>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer {}\r\n\r\n",
+            path_and_query, addr, bearer_token
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+
+        let mut buf = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 512];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "EOF waiting for WS handshake");
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header_text = String::from_utf8_lossy(&buf[..pos]);
+                assert!(
+                    header_text.contains("101 Switching Protocols"),
+                    "expected 101 Switching Protocols, got: {header_text}"
+                );
+                let leftover = buf.split_off(pos + 4);
+                return (stream, leftover);
+            }
+        }
+    }
+
+    async fn ws_read_exact(
+        stream: &mut tokio::net::TcpStream,
+        leftover: &mut Vec<u8>,
+        len: usize,
+    ) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        while leftover.len() < len {
+            let mut tmp = [0u8; 1024];
+            let n = stream.read(&mut tmp).await.unwrap();
+            assert!(n > 0, "unexpected EOF reading WS frame");
+            leftover.extend_from_slice(&tmp[..n]);
+        }
+        leftover.drain(..len).collect()
+    }
+
+    async fn ws_read_json(
+        stream: &mut tokio::net::TcpStream,
+        leftover: &mut Vec<u8>,
+    ) -> Value {
+        loop {
+            let hdr = ws_read_exact(stream, leftover, 2).await;
+            let opcode = hdr[0] & 0x0F;
+            let masked = (hdr[1] & 0x80) != 0;
+            let len7 = hdr[1] & 0x7F;
+            let payload_len: usize = match len7 {
+                126 => {
+                    let ext = ws_read_exact(stream, leftover, 2).await;
+                    u16::from_be_bytes([ext[0], ext[1]]) as usize
+                }
+                127 => {
+                    let ext = ws_read_exact(stream, leftover, 8).await;
+                    u64::from_be_bytes(ext.try_into().unwrap()) as usize
+                }
+                n => n as usize,
+            };
+            let mask = if masked {
+                Some(ws_read_exact(stream, leftover, 4).await)
+            } else {
+                None
+            };
+            let mut payload = ws_read_exact(stream, leftover, payload_len).await;
+            if let Some(m) = mask {
+                for (i, b) in payload.iter_mut().enumerate() {
+                    *b ^= m[i % 4];
+                }
+            }
+            if opcode == 0x1 {
+                return serde_json::from_slice(&payload).unwrap();
+            }
+            assert_ne!(opcode, 0x8, "server closed WebSocket unexpectedly");
+        }
+    }
+
+    async fn ws_send_text(stream: &mut tokio::net::TcpStream, text: &str) {
+        use tokio::io::AsyncWriteExt;
+        let bytes = text.as_bytes();
+        let mut frame = Vec::with_capacity(bytes.len() + 14);
+        frame.push(0x81); // FIN + Text
+        if bytes.len() < 126 {
+            frame.push(0x80 | (bytes.len() as u8));
+        } else {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        }
+        let mask = [0x11u8, 0x22, 0x33, 0x44];
+        frame.extend_from_slice(&mask);
+        for (i, b) in bytes.iter().enumerate() {
+            frame.push(b ^ mask[i % 4]);
+        }
+        stream.write_all(&frame).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ws_telemetry_mux_instant_push_and_reconnect_flush() {
+        let (app, state, rpc_token, node_token) = test_app();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let node_id = "CAB-WS-MUX-01";
+        let (mut stream, mut leftover) = ws_connect(
+            addr,
+            &format!("/api/v1/ws/telemetry?node_id={node_id}"),
+            &node_token,
+        )
+        .await;
+
+        // Initial ThemeChanged arrives immediately on connect
+        let first = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            ws_read_json(&mut stream, &mut leftover),
+        )
+        .await
+        .expect("initial ThemeChanged should arrive within 50ms");
+        assert_eq!(first["kind"], "theme_changed");
+
+        // Enqueued command arrives via WS mux in < 50 ms without polling
+        let t0 = std::time::Instant::now();
+        let ping_rec = state
+            .enqueue_command(node_id, CabinetCommand::Ping { seq: 42 })
+            .await;
+        assert_eq!(ping_rec.status, CommandStatus::Dispatched);
+        assert!(state
+            .pending_commands
+            .read()
+            .await
+            .get(node_id)
+            .map_or(true, |q| q.is_empty()));
+
+        let cmd_msg = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            ws_read_json(&mut stream, &mut leftover),
+        )
+        .await
+        .expect("CabinetCommand should push over WS within 50ms");
+        assert!(t0.elapsed() < std::time::Duration::from_millis(50));
+        assert_eq!(cmd_msg["kind"], "command");
+        assert_eq!(cmd_msg["record"]["id"], ping_rec.id);
+        assert_eq!(cmd_msg["record"]["command"]["type"], "ping");
+
+        // Broadcast ThemeChanged arrives over WS mux in < 50 ms
+        let client = reqwest::Client::new();
+        let t1 = std::time::Instant::now();
+        let theme_res = client
+            .post(format!("http://{addr}/api/v1/ui/theme"))
+            .bearer_auth(&rpc_token)
+            .json(&json!({ "theme": "vector" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(theme_res.status(), StatusCode::OK);
+
+        let theme_msg = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            ws_read_json(&mut stream, &mut leftover),
+        )
+        .await
+        .expect("ThemeChanged should broadcast over WS within 50ms");
+        assert!(t1.elapsed() < std::time::Duration::from_millis(50));
+        assert_eq!(theme_msg["kind"], "theme_changed");
+        assert_eq!(theme_msg["theme"], "vector");
+
+        // Disconnect and wait briefly for server unregister
+        drop(stream);
+        for _ in 0..50 {
+            if !state.node_ws_tx.read().await.contains_key(node_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert!(!state.node_ws_tx.read().await.contains_key(node_id));
+
+        // While disconnected, enqueue falls back to pending_commands
+        let queued_rec = state
+            .enqueue_command(node_id, CabinetCommand::AddCredits { credits: 3 })
+            .await;
+        assert_eq!(queued_rec.status, CommandStatus::Queued);
+        assert_eq!(
+            state.pending_commands.read().await.get(node_id).unwrap().len(),
+            1
+        );
+
+        // Reconnect without ?node_id= and register lazily via first NodeTelemetry message
+        let (mut stream2, mut leftover2) =
+            ws_connect(addr, "/api/v1/ws/telemetry", &node_token).await;
+        let hb = NodeTelemetry {
+            node_id: node_id.to_string(),
+            hardware: "x86_64".into(),
+            soc: "generic".into(),
+            cpu_temp_c: Some(48.0),
+            gpu_temp_c: None,
+            npu_load_pct: 0.0,
+            active_core: "none".into(),
+            active_rom: "idle".into(),
+            frame_time_ms: 16.6,
+            fps: 60.0,
+            input_jitter: Default::default(),
+            netplay: None,
+            credits: Default::default(),
+            mode: json!({ "type": "Standalone" }),
+            timestamp_epoch_ms: now_epoch_ms(),
+        };
+        ws_send_text(&mut stream2, &serde_json::to_string(&hb).unwrap()).await;
+
+        let flushed_cmd = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ws_read_json(&mut stream2, &mut leftover2),
+        )
+        .await
+        .expect("pending command should flush on WS reconnect");
+        assert_eq!(flushed_cmd["kind"], "command");
+        assert_eq!(flushed_cmd["record"]["id"], queued_rec.id);
+        assert_eq!(flushed_cmd["record"]["status"], "dispatched");
+        assert!(state
+            .pending_commands
+            .read()
+            .await
+            .get(node_id)
+            .map_or(true, |q| q.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn test_brc_session_full_lifecycle_grace_topup_and_end() {
+        let (app, state, rpc_token, node_token) = test_app();
+        let node_id = "CAB-SESS-LIFE";
+        let mut alerts_rx = state.buses[&SseChannel::Alerts].subscribe();
+
+        // 1. Start session via activate_game_time_pass
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/plugins/pos-payments/action")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "action": "activate_game_time_pass",
+                    "payload": {
+                        "node_id": node_id,
+                        "duration_mins": 30,
+                        "credits": 10,
+                        "topup_grace_secs": 90,
+                        "game_ids": ["dkc", "sfiii3"]
+                    }
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = read_json_body(res).await;
+        let result = &body["result"];
+        let session_code = result["session_code"].as_str().unwrap().to_string();
+        let session_id = result["session_id"].as_str().unwrap().to_string();
+        assert!(session_code.starts_with("BRC-"));
+        assert_eq!(result["topup_grace_secs"], 90);
+        assert_eq!(result["games"].as_array().unwrap().len(), 2);
+
+        // Drain initial StartSession + AddCredits from pending_commands
+        let _ = state.pending_commands.write().await.remove(node_id);
+
+        // 2. Public patron lookup (case-insensitive)
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/sessions/{}", session_code.to_lowercase()))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let sess_view = read_json_body(res).await;
+        assert_eq!(sess_view["ok"], true);
+        assert_eq!(sess_view["session_code"], session_code);
+        assert_eq!(sess_view["in_grace"], false);
+        assert_eq!(sess_view["games"][0]["game_id"], "dkc");
+
+        // 3. Cabinet reports SessionExpired -> enters grace window & notifies Alerts SSE
+        let expired_ev = CabinetEvent::SessionExpired {
+            session_id: session_id.clone(),
+        };
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/cabinet/{node_id}/events"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {node_token}"))
+            .body(Body::from(serde_json::to_vec(&expired_ev).unwrap()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let alert_raw = alerts_rx.try_recv().unwrap();
+        let alert_json: Value = serde_json::from_str(&alert_raw).unwrap();
+        assert_eq!(alert_json["kind"], "cabinet_event");
+        assert_eq!(alert_json["session_code"], session_code);
+        assert!(alert_json["grace_until_epoch_ms"].as_u64().is_some());
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/sessions/{session_code}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let grace_view = read_json_body(res).await;
+        assert_eq!(grace_view["in_grace"], true);
+
+        // 4. Patron tops up + swaps games via POST /api/v1/sessions/:code/update
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/sessions/{session_code}/update"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "game_ids": ["batman_returns", "mvc2"],
+                    "add_secs": 900
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let upd_body = read_json_body(res).await;
+        assert_eq!(upd_body["ok"], true);
+        assert_eq!(upd_body["session"]["in_grace"], false);
+        assert_eq!(upd_body["session"]["games"].as_array().unwrap().len(), 2);
+
+        // Verify UpdateSession command was queued for the cabinet
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/cabinet/{node_id}/commands"))
+            .header(header::AUTHORIZATION, format!("Bearer {node_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let cmds_body = read_json_body(res).await;
+        let cmds = cmds_body["commands"].as_array().unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0]["command"]["type"], "update_session");
+        assert_eq!(cmds[0]["command"]["add_secs"], 900);
+
+        // 5. Operator force-ends session via POST /api/v1/sessions/:code/end
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/sessions/{session_code}/end"))
+            .header(header::AUTHORIZATION, format!("Bearer {rpc_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Lookup now returns 404
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/sessions/{session_code}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn test_admin_catalogue_toggle_and_boss_roms_dir_scan() {
+        let _guard = ENV_TEST_LOCK.lock().await;
+        let tmp_root = std::env::temp_dir().join(format!("boss-admin-cat-{}", uuid::Uuid::new_v4()));
+        let roms_root = tmp_root.join("roms");
+        let snes_dir = roms_root.join("snes");
+        std::fs::create_dir_all(&snes_dir).unwrap();
+
+        let rom_bytes = b"CHRONO_TRIGGER_TEST_ROM_IMAGE";
+        let expected_sha = beercade_shared::crypto::compute_sha256(rom_bytes);
+        std::fs::write(snes_dir.join("Chrono Trigger.sfc"), rom_bytes).unwrap();
+
+        let prev_roms = std::env::var_os("BOSS_ROMS_DIR");
+        std::env::set_var("BOSS_ROMS_DIR", &roms_root);
+
+        let (app, _state, rpc_token, _node_token) = test_app();
+
+        // Import from BOSS_ROMS_DIR (no explicit body dir)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/admin/games/import")
+            .header(header::AUTHORIZATION, format!("Bearer {rpc_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let imp = read_json_body(res).await;
+        assert_eq!(imp["ok"], true);
+        assert_eq!(imp["imported"], 1);
+
+        // Verify GET /api/v1/admin/games shows the real SHA-256 and on_disk=true
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/admin/games")
+            .header(header::AUTHORIZATION, format!("Bearer {rpc_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let list = read_json_body(res).await;
+        let chrono = list["games"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["game_id"] == "chrono_trigger")
+            .expect("chrono_trigger should appear in admin games");
+        assert_eq!(chrono["sha256"], expected_sha);
+        assert_eq!(chrono["enabled"], true);
+        assert_eq!(chrono["on_disk"], true);
+
+        // Toggle disabled
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/admin/games/chrono_trigger/toggle")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {rpc_token}"))
+            .body(Body::from(r#"{"enabled":false}"#))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let toggled = read_json_body(res).await;
+        assert_eq!(toggled["game"]["enabled"], false);
+
+        // Public /api/v1/games omits disabled games
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/games")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        let public_games = read_json_body(res).await;
+        assert!(!public_games
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["game_id"] == "chrono_trigger"));
+
+        match prev_roms {
+            Some(v) => std::env::set_var("BOSS_ROMS_DIR", v),
+            None => std::env::remove_var("BOSS_ROMS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp_root);
     }
 }

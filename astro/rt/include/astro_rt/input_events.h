@@ -32,6 +32,17 @@ extern "C" {
 #define ASTRO_RT_STATS_VERSION      1u
 #define ASTRO_RT_HIST_BUCKETS       32
 
+#define ASTRO_RT_MENU_SOCK_DEFAULT  "/run/astro/menu.sock"
+#define ASTRO_RT_MENU_SHM_NAME      "/astro_rt_menu"
+
+enum astro_menu_code {
+    ASTRO_MENU_TOGGLE = 0,
+    ASTRO_MENU_UP     = 1,
+    ASTRO_MENU_DOWN   = 2,
+    ASTRO_MENU_OK     = 3,
+    ASTRO_MENU_BACK   = 4
+};
+
 /* libretro-compatible button bit positions (RETRO_DEVICE_ID_JOYPAD_*) */
 enum astro_pad_buttons {
     ASTRO_BTN_B      = 0,  ASTRO_BTN_Y      = 1,  ASTRO_BTN_SELECT = 2,
@@ -168,6 +179,10 @@ void astro_input_compute_percentiles(const uint32_t* buckets,
 
 /* Library identity, for RetroArch driver registration asserts. */
 const char* astro_input_ident(void);
+
+/* Inject a synthetic evdev event on slot 0 (unit tests only).
+ * Returns 1 if pushed to the game ring, 0 if suppressed/ignored. */
+int astro_input_inject_test_event(uint16_t type, uint16_t code, int32_t value, uint64_t ts_mono_us);
 
 #ifdef __cplusplus
 } /* extern "C" */

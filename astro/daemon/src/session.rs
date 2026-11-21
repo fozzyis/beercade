@@ -60,6 +60,8 @@ pub struct Session {
     pub continue_secs: u32,
     pub games: Vec<GameRef>,
     pub ready: Vec<String>,
+    pub failed: Vec<String>,
+    pub pending_prune: bool,
     pub phase: Phase,
 }
 
@@ -82,6 +84,8 @@ impl Session {
             continue_secs: continue_secs.min(grace_secs),
             games: games.clone(),
             ready: Vec::new(),
+            failed: Vec::new(),
+            pending_prune: false,
             phase: if games.is_empty() { Phase::Picker } else { Phase::Staging },
         };
         let fx = if games.is_empty() { Vec::new() } else { vec![Effect::Stage(games)] };
@@ -101,14 +105,24 @@ impl Session {
         self.games.iter().filter(|g| self.ready.contains(&g.game_id)).collect()
     }
 
-    /// Staging finished.
+    /// Incremental or batch staging progress. Unlocks `Picker` on the first
+    /// ready ROM (or once every game has settled).
     pub fn staged(&mut self, ready: Vec<String>, failed: Vec<String>) -> Vec<Effect> {
-        for id in ready.iter() {
+        for id in &ready {
             if !self.ready.contains(id) && self.game(id).is_some() {
                 self.ready.push(id.clone());
             }
+            self.failed.retain(|f| f != id);
         }
-        if self.phase == Phase::Staging {
+        for id in &failed {
+            if !self.ready.contains(id) && !self.failed.contains(id) && self.game(id).is_some() {
+                self.failed.push(id.clone());
+            }
+        }
+        if self.phase == Phase::Staging
+            && (!self.ready.is_empty()
+                || self.ready.len().saturating_add(self.failed.len()) >= self.games.len())
+        {
             self.phase = Phase::Picker;
         }
         vec![Effect::Event(CabinetEvent::SessionStaged {
@@ -135,11 +149,15 @@ impl Session {
             Phase::Expired { paused_game, .. } => *paused_game = None,
             _ => {}
         }
-        vec![Effect::Event(CabinetEvent::GameExited {
+        let mut fx = vec![Effect::Event(CabinetEvent::GameExited {
             session_id: self.id.clone(),
             game_id: game_id.to_string(),
             crashed,
-        })]
+        })];
+        if std::mem::take(&mut self.pending_prune) {
+            fx.push(Effect::Prune);
+        }
+        fx
     }
 
     /// One second passed.
@@ -214,10 +232,21 @@ impl Session {
             return Vec::new();
         }
         self.ready.retain(|id| games.iter().any(|g| &g.game_id == id));
+        self.failed.retain(|id| games.iter().any(|g| &g.game_id == id));
         let new: Vec<GameRef> =
             games.iter().filter(|g| !self.ready.contains(&g.game_id)).cloned().collect();
         self.games = games;
-        let mut fx = vec![Effect::Prune];
+        let is_running = matches!(
+            self.phase,
+            Phase::InGame { .. } | Phase::Expired { paused_game: Some(_), .. }
+        );
+        let mut fx = if is_running {
+            self.pending_prune = true;
+            Vec::new()
+        } else {
+            self.pending_prune = false;
+            vec![Effect::Prune]
+        };
         if !new.is_empty() {
             fx.push(Effect::Stage(new));
         }
@@ -246,6 +275,8 @@ impl Session {
     fn finish(&mut self) -> Vec<Effect> {
         self.phase = Phase::Ended;
         self.ready.clear();
+        self.failed.clear();
+        self.pending_prune = false;
         vec![
             Effect::Wipe,
             Effect::Event(CabinetEvent::SessionEnded {
@@ -365,7 +396,46 @@ mod tests {
         let fx = s.end();
         assert_eq!(fx[0], Effect::CloseGame);
         assert!(fx.contains(&Effect::Wipe));
+        assert!(!s.is_live());
         assert!(s.end().is_empty(), "ending twice does nothing");
         assert!(s.add_time(60).is_empty());
+    }
+
+    #[test]
+    fn first_ready_rom_unlocks_picker_while_second_streams() {
+        let (mut s, _) = Session::start("s1", "C", 600, 30, 10, vec![g("a"), g("b")]);
+        assert_eq!(s.phase, Phase::Staging);
+
+        // First ROM failure alone keeps Staging until a ready ROM arrives or all settle.
+        s.staged(vec![], vec!["a".into()]);
+        assert_eq!(s.phase, Phase::Staging);
+
+        // First ready ROM immediately unlocks Picker!
+        let (mut s2, _) = Session::start("s2", "C", 600, 30, 10, vec![g("a"), g("b")]);
+        s2.staged(vec!["a".into()], vec![]);
+        assert_eq!(s2.phase, Phase::Picker);
+        assert_eq!(s2.playable(), vec![&g("a")]);
+
+        // Second ROM finishes later while Picker (or InGame) is active.
+        s2.staged(vec!["b".into()], vec![]);
+        assert_eq!(s2.playable(), vec![&g("a"), &g("b")]);
+    }
+
+    #[test]
+    fn update_session_defers_prune_until_game_exited() {
+        let mut s = running(600, 30);
+        s.game_started("a");
+
+        // Replace games while "a" is running: Stage("c"), defer Prune!
+        let fx = s.replace_games(vec![g("b"), g("c")]);
+        assert!(!fx.contains(&Effect::Prune));
+        assert_eq!(fx, vec![Effect::Stage(vec![g("c")])]);
+        assert!(s.pending_prune);
+
+        // When "a" exits, Prune runs immediately.
+        let exit_fx = s.game_exited("a", false);
+        assert!(exit_fx.contains(&Effect::Prune));
+        assert!(!s.pending_prune);
+        assert_eq!(s.phase, Phase::Picker);
     }
 }

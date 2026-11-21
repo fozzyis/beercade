@@ -11,7 +11,9 @@ use std::path::Path as FsPath;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
-use sha2::{Sha256, Digest};
+
+use beercade_shared::crypto::Sha256Hasher;
+use beercade_shared::WsServerMessage;
 
 use crate::auth::RequireRpcToken;
 use crate::models::now_epoch_ms;
@@ -19,6 +21,14 @@ use crate::state::{SharedState, SseChannel};
 
 /// Staging directory shared by the upload gateway and the node sync endpoint.
 const SYNC_DIR: &'static str = "/data/beercade/sync";
+
+fn sync_dir() -> String {
+    std::env::var("BOSS_SYNC_DIR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| SYNC_DIR.to_string())
+}
 
 /// Hard ceiling for a single OTA payload. Enforced on both the `Content-Length`
 /// header and every streamed chunk so a malicious (or misbehaving) client can
@@ -45,7 +55,7 @@ fn max_payload_bytes() -> u64 {
 /// via `ReaderStream` so huge images are never buffered in memory.
 pub async fn payload_download_handler(Path(filename): Path<String>) -> Response {
     let safe = sanitize_filename(&filename);
-    let path_str = format!("{}/{}", SYNC_DIR, safe);
+    let path_str = format!("{}/{}", sync_dir(), safe);
     let path = FsPath::new(&path_str);
 
     match File::open(path).await {
@@ -140,7 +150,9 @@ pub async fn payload_upload_handler(
     // Sanitize filename roughly to prevent path traversal.
     let safe_filename = sanitize_filename(&filename);
 
-    let path_str = format!("{}/{}", SYNC_DIR, safe_filename);
+    let dir = sync_dir();
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let path_str = format!("{}/{}", dir, safe_filename);
     let path = FsPath::new(&path_str);
 
     let mut file = match File::create(path).await {
@@ -158,7 +170,7 @@ pub async fn payload_upload_handler(
 
     let mut total_bytes = 0;
     let mut too_large = false;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     while let Some(chunk) = data_stream.next().await {
         match chunk {
             Ok(bytes) => {
@@ -206,22 +218,30 @@ pub async fn payload_upload_handler(
 
     tracing::info!("Received payload '{}', {} bytes.", safe_filename, total_bytes);
 
-    let hash_hex = format!("{:x}", hasher.finalize());
+    let hash_hex = hasher.finalize_hex();
     let sha256_path_str = format!("{}.sha256", path_str);
-    if let Err(e) = tokio::fs::write(&sha256_path_str, hash_hex).await {
+    if let Err(e) = tokio::fs::write(&sha256_path_str, &hash_hex).await {
         tracing::error!("Failed to write sha256 file for {}: {}", path_str, e);
     }
 
-    // Notify connected nodes about the new payload.
+    // Notify connected nodes about the new payload over SSE and WS mux.
     state.publish(
         SseChannel::Commands,
         &json!({
             "kind": "payload_available",
             "filename": safe_filename,
+            "sha256": hash_hex,
             "size_bytes": total_bytes,
             "at_epoch_ms": now_epoch_ms(),
         }),
     );
+    state
+        .broadcast_ws(WsServerMessage::PayloadAvailable {
+            filename: safe_filename.clone(),
+            sha256: Some(hash_hex),
+            size_bytes: Some(total_bytes as u64),
+        })
+        .await;
 
     (StatusCode::OK, Json(json!({
         "status": "ok",
@@ -233,7 +253,7 @@ pub async fn payload_upload_handler(
 
 /// GET /api/v1/sync — list staged SquashFS OTA payloads in `/data/beercade/sync`.
 pub async fn list_payloads_handler(_auth: RequireRpcToken) -> Json<serde_json::Value> {
-    let sync_dir = std::env::var("BOSS_SYNC_DIR").unwrap_or_else(|_| SYNC_DIR.to_string());
+    let sync_dir = sync_dir();
     let mut payloads = Vec::new();
     if let Ok(mut rd) = tokio::fs::read_dir(&sync_dir).await {
         while let Ok(Some(entry)) = rd.next_entry().await {

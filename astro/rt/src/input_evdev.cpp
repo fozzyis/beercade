@@ -10,15 +10,19 @@
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -43,6 +47,12 @@ struct AxisCalibration {
     int32_t maximum = 0;
 };
 
+enum class MenuVertical : uint8_t {
+    Up = 0,
+    Neutral = 1,
+    Down = 2,
+};
+
 struct DeviceState {
     int fd = -1;
     uint16_t slot = 0;
@@ -50,6 +60,11 @@ struct DeviceState {
     bool has_mono_clock = false;
     char dev_name[32]{};
     AxisCalibration axes[ASTRO_INPUT_MAX_AXES]{};
+    MenuVertical menu_y = MenuVertical::Neutral;
+    MenuVertical menu_hat = MenuVertical::Neutral;
+    bool menu_start = false;
+    bool menu_select = false;
+    bool menu_combo_fired = false;
 };
 
 constexpr uint16_t kMappedAxes[6] = {
@@ -67,6 +82,13 @@ uint32_t g_hist_buckets[ASTRO_RT_HIST_BUCKETS]{};
 uint32_t g_hist_max_us = 0;
 uint32_t g_shm_seq = 0;
 uint32_t g_event_seq = 0;
+
+int g_menu_fd = -1;
+struct sockaddr_un g_menu_addr{};
+socklen_t g_menu_addr_len = 0;
+bool g_menu_addr_valid = false;
+int g_menu_shm_fd = -1;
+const uint32_t* g_menu_grab_ptr = nullptr;
 
 void log_msg(astro_input_log_level lvl, const char* msg) {
     if (lvl <= g_cfg.log_level) {
@@ -239,6 +261,165 @@ void close_stats_shm() {
     close_fd_checked(g_shm_fd);
 }
 
+void open_menu_bridge() {
+    g_menu_addr = sockaddr_un{};
+    g_menu_addr_len = 0;
+    g_menu_addr_valid = false;
+
+    const char* sock_env = std::getenv("ASTRO_RT_MENU_SOCK");
+    const char* sock_path = (sock_env && sock_env[0] != '\0') ? sock_env : ASTRO_RT_MENU_SOCK_DEFAULT;
+    const size_t sock_len = std::strlen(sock_path);
+    if (sock_len > 0 && sock_len < sizeof(g_menu_addr.sun_path)) {
+        g_menu_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        if (g_menu_fd < 0) {
+            log_errno(ASTRO_LOG_ERROR, "socket(AF_UNIX, SOCK_DGRAM) failed");
+        } else {
+            g_menu_addr.sun_family = AF_UNIX;
+            std::memcpy(g_menu_addr.sun_path, sock_path, sock_len + 1);
+            g_menu_addr_len = static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + sock_len + 1);
+            g_menu_addr_valid = true;
+        }
+    }
+
+    const char* shm_env = std::getenv("ASTRO_RT_MENU_SHM");
+    const char* shm_name = (shm_env && shm_env[0] != '\0') ? shm_env : ASTRO_RT_MENU_SHM_NAME;
+    int fd = shm_open(shm_name, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) {
+        if (errno != ENOENT) {
+            log_errno(ASTRO_LOG_ERROR, "shm_open(menu) failed");
+        }
+        return;
+    }
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || static_cast<size_t>(st.st_size) < sizeof(uint32_t)) {
+        close_fd_checked(fd);
+        return;
+    }
+    void* ptr = mmap(nullptr, sizeof(uint32_t), PROT_READ, MAP_SHARED, fd, 0);
+    if (ptr == MAP_FAILED) {
+        log_errno(ASTRO_LOG_ERROR, "mmap(menu shm) failed");
+        close_fd_checked(fd);
+        return;
+    }
+    g_menu_shm_fd = fd;
+    g_menu_grab_ptr = static_cast<const uint32_t*>(ptr);
+}
+
+void close_menu_bridge() {
+    if (g_menu_grab_ptr) {
+        if (munmap(const_cast<uint32_t*>(g_menu_grab_ptr), sizeof(uint32_t)) != 0) {
+            log_errno(ASTRO_LOG_ERROR, "munmap(menu shm) failed");
+        }
+        g_menu_grab_ptr = nullptr;
+    }
+    close_fd_checked(g_menu_shm_fd);
+    close_fd_checked(g_menu_fd);
+    g_menu_addr = sockaddr_un{};
+    g_menu_addr_len = 0;
+    g_menu_addr_valid = false;
+}
+
+bool is_menu_grabbed() {
+    return g_menu_grab_ptr != nullptr &&
+           __atomic_load_n(g_menu_grab_ptr, __ATOMIC_ACQUIRE) != 0u;
+}
+
+void send_menu_code(uint8_t code) {
+    if (g_menu_fd < 0 || !g_menu_addr_valid) {
+        return;
+    }
+    const ssize_t rc = sendto(g_menu_fd, &code, 1, MSG_DONTWAIT,
+                              reinterpret_cast<const struct sockaddr*>(&g_menu_addr),
+                              g_menu_addr_len);
+    if (rc < 0) {
+        const int err = errno;
+        if (err != EAGAIN && err != EWOULDBLOCK && err != ENOENT &&
+            err != ECONNREFUSED && err != ENOTCONN) {
+            log_errno(ASTRO_LOG_ERROR, "menu bridge sendto() failed");
+        }
+    }
+}
+
+int poll_menu_hotkey(DeviceState& dev, uint16_t type, uint16_t code, int32_t value) {
+    if (type == EV_KEY) {
+        const bool down = (value != 0);
+        if (code == BTN_START || code == BTN_BASE4) {
+            dev.menu_start = down;
+        } else if (code == BTN_SELECT || code == BTN_BASE3) {
+            dev.menu_select = down;
+        }
+        if (dev.menu_start && dev.menu_select) {
+            if (!dev.menu_combo_fired) {
+                dev.menu_combo_fired = true;
+                return ASTRO_MENU_TOGGLE;
+            }
+            return -1;
+        }
+        if (!dev.menu_start && !dev.menu_select) {
+            dev.menu_combo_fired = false;
+        }
+        if (value != 1) {
+            return -1;
+        }
+        switch (code) {
+            case KEY_TAB:
+            case BTN_MODE:
+                return ASTRO_MENU_TOGGLE;
+            case KEY_UP:
+            case BTN_DPAD_UP:
+                return ASTRO_MENU_UP;
+            case KEY_DOWN:
+            case BTN_DPAD_DOWN:
+                return ASTRO_MENU_DOWN;
+            case KEY_ENTER:
+            case KEY_LEFTCTRL:
+            case BTN_SOUTH:
+            case BTN_TRIGGER:
+                return ASTRO_MENU_OK;
+            case KEY_ESC:
+            case KEY_BACKSPACE:
+            case KEY_LEFTALT:
+            case BTN_EAST:
+            case BTN_THUMB:
+                return ASTRO_MENU_BACK;
+            default:
+                return -1;
+        }
+    } else if (type == EV_ABS) {
+        int dir = 0;
+        MenuVertical* slot = nullptr;
+        if (code == ABS_HAT0Y) {
+            dir = (value < 0) ? -1 : ((value > 0) ? 1 : 0);
+            slot = &dev.menu_hat;
+        } else if (code == ABS_Y) {
+            const AxisCalibration& cal = dev.axes[1];
+            if (!cal.valid || cal.maximum <= cal.minimum) {
+                return -1;
+            }
+            const int64_t quarter =
+                (static_cast<int64_t>(cal.maximum) - static_cast<int64_t>(cal.minimum)) / 4LL;
+            if (static_cast<int64_t>(value) <= static_cast<int64_t>(cal.minimum) + quarter) {
+                dir = -1;
+            } else if (static_cast<int64_t>(value) >= static_cast<int64_t>(cal.maximum) - quarter) {
+                dir = 1;
+            } else {
+                dir = 0;
+            }
+            slot = &dev.menu_y;
+        } else {
+            return -1;
+        }
+        const MenuVertical next = (dir < 0) ? MenuVertical::Up
+                                          : ((dir > 0) ? MenuVertical::Down : MenuVertical::Neutral);
+        const bool fired = (*slot == MenuVertical::Neutral && next != MenuVertical::Neutral);
+        *slot = next;
+        if (fired) {
+            return (next == MenuVertical::Up) ? ASTRO_MENU_UP : ASTRO_MENU_DOWN;
+        }
+    }
+    return -1;
+}
+
 bool port_in_use(uint16_t port) {
     for (unsigned s = 0; s < ASTRO_INPUT_MAX_DEVICES; ++s) {
         if (g_devices[s].fd >= 0 && g_devices[s].assigned_port == port) {
@@ -270,6 +451,11 @@ void query_abs_calibration(int fd, DeviceState& dev) {
     for (size_t i = 0; i < ASTRO_INPUT_MAX_AXES; ++i) {
         dev.axes[i] = AxisCalibration{};
     }
+    dev.menu_y = MenuVertical::Neutral;
+    dev.menu_hat = MenuVertical::Neutral;
+    dev.menu_start = false;
+    dev.menu_select = false;
+    dev.menu_combo_fired = false;
     for (size_t i = 0; i < sizeof(kMappedAxes) / sizeof(kMappedAxes[0]); ++i) {
         struct input_absinfo absinfo{};
         if (ioctl(fd, EVIOCGABS(kMappedAxes[i]), &absinfo) == 0 &&
@@ -365,6 +551,11 @@ void remove_device_slot(unsigned slot, bool count_hotplug_remove) {
     for (size_t i = 0; i < ASTRO_INPUT_MAX_AXES; ++i) {
         dev.axes[i] = AxisCalibration{};
     }
+    dev.menu_y = MenuVertical::Neutral;
+    dev.menu_hat = MenuVertical::Neutral;
+    dev.menu_start = false;
+    dev.menu_select = false;
+    dev.menu_combo_fired = false;
 
     const uint32_t prev_active = __atomic_load_n(&g_stats.devices_active, __ATOMIC_RELAXED);
     if (prev_active > 0) {
@@ -529,9 +720,30 @@ void* evdev_thread_main(void* arg) {
                                 continue;
                             }
 
+                            const int menu_code = poll_menu_hotkey(
+                                g_devices[s], evs[j].type, evs[j].code, evs[j].value);
+                            if (menu_code >= 0) {
+                                send_menu_code(static_cast<uint8_t>(menu_code));
+                            }
+
+                            const uint64_t ts_mono_us =
+                                static_cast<uint64_t>(evs[j].time.tv_sec) * 1000000ULL +
+                                static_cast<uint64_t>(evs[j].time.tv_usec);
+
+                            if (g_devices[s].has_mono_clock && have_wake_ts) {
+                                const uint64_t delta_us = (wake_us >= ts_mono_us)
+                                                              ? (wake_us - ts_mono_us)
+                                                              : 0ULL;
+                                record_latency_sample(delta_us);
+                                shm_dirty = true;
+                            }
+
+                            if (is_menu_grabbed()) {
+                                continue;
+                            }
+
                             astro_input_event aie{};
-                            aie.ts_mono_us = static_cast<uint64_t>(evs[j].time.tv_sec) * 1000000ULL +
-                                             static_cast<uint64_t>(evs[j].time.tv_usec);
+                            aie.ts_mono_us = ts_mono_us;
                             aie.seq = ++g_event_seq;
                             aie.device_slot = g_devices[s].slot;
                             aie.type = evs[j].type;
@@ -547,14 +759,6 @@ void* evdev_thread_main(void* arg) {
                                         g_devices[s].axes[axis].minimum,
                                         g_devices[s].axes[axis].maximum));
                                 }
-                            }
-
-                            if (g_devices[s].has_mono_clock && have_wake_ts) {
-                                const uint64_t delta_us = (wake_us >= aie.ts_mono_us)
-                                                              ? (wake_us - aie.ts_mono_us)
-                                                              : 0ULL;
-                                record_latency_sample(delta_us);
-                                shm_dirty = true;
                             }
 
                             assign_port_if_needed(g_devices[s], aie.type, aie.value);
@@ -758,6 +962,11 @@ int astro_input_start(const struct astro_input_config* cfg) {
     }
 
     open_stats_shm();
+    open_menu_bridge();
+    {
+        astro_input_event discard{};
+        while (g_ring.try_pop(discard)) {}
+    }
     g_stop.store(false, std::memory_order_release);
 
     pthread_attr_t attr;
@@ -802,6 +1011,7 @@ int astro_input_start(const struct astro_input_config* cfg) {
         for (unsigned s = 0; s < ASTRO_INPUT_MAX_DEVICES; ++s) {
             remove_device_slot(s, false);
         }
+        close_menu_bridge();
         close_stats_shm();
         close_fd_checked(g_inotify_fd);
         g_inotify_wd = -1;
@@ -845,6 +1055,7 @@ void astro_input_stop(void) {
     g_inotify_wd = -1;
     close_fd_checked(g_inotify_fd);
     close_fd_checked(g_wake_fd);
+    close_menu_bridge();
     close_stats_shm();
 }
 
@@ -921,6 +1132,47 @@ void astro_input_get_stats(struct astro_input_stats* out) {
 
 const char* astro_input_ident(void) {
     return "astro_rt_v1";
+}
+
+int astro_input_inject_test_event(uint16_t type, uint16_t code, int32_t value, uint64_t ts_mono_us) {
+    if (type == EV_SYN || type == EV_MSC) {
+        return 0;
+    }
+    DeviceState& dev = g_devices[0];
+    const int menu_code = poll_menu_hotkey(dev, type, code, value);
+    if (menu_code >= 0) {
+        send_menu_code(static_cast<uint8_t>(menu_code));
+    }
+    if (is_menu_grabbed()) {
+        return 0;
+    }
+
+    astro_input_event aie{};
+    aie.ts_mono_us = ts_mono_us;
+    aie.seq = ++g_event_seq;
+    aie.device_slot = dev.slot;
+    aie.type = type;
+    aie.code = code;
+    aie.value = value;
+
+    if (aie.type == EV_ABS) {
+        const int axis = map_axis_code(aie.code);
+        if (axis >= 0 && axis < ASTRO_INPUT_MAX_AXES && dev.axes[axis].valid) {
+            aie.value = static_cast<int32_t>(astro_input_scale_abs(
+                value, dev.axes[axis].minimum, dev.axes[axis].maximum));
+        }
+    }
+
+    assign_port_if_needed(dev, aie.type, aie.value);
+    aie.port = dev.assigned_port;
+    if (aie.port == 0xFFFF) {
+        return 0;
+    }
+    if (g_ring.try_push(aie)) {
+        __atomic_fetch_add(&g_stats.events_total, 1u, __ATOMIC_RELAXED);
+        return 1;
+    }
+    return 0;
 }
 
 } // extern "C"

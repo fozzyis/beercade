@@ -1,18 +1,18 @@
-//! Cabinet controls for the A.S.T.R.O. pause menu, read straight from evdev.
+//! Cabinet controls for the A.S.T.R.O. pause menu, bridged from `astro_rt`.
 //!
-//! Every `/dev/input/event*` device is watched, so arcade encoders that show
-//! up as keyboards (MAME layout), generic USB joysticks and gamepads all work.
-//! While the menu is open the devices are grabbed (EVIOCGRAB), so RetroArch,
-//! paused underneath, sees none of the menu presses: no stray hotkeys, and
-//! ESC cannot quit the emulator.
-//!
-//! Menu key: TAB (MAME's menu key), the gamepad guide button, or START+SELECT
-//! held together.
+//! `astro_rt` runs the dedicated 1000 Hz evdev producer inside RetroArch and
+//! forwards menu hotkeys over a non-blocking Unix `SOCK_DGRAM` socket
+//! (`/run/astro/menu.sock`), while reading a shared-memory atomic grab flag
+//! (`/dev/shm/astro_rt_menu`) so RetroArch sees zero menu presses while the
+//! pause menu is open.
 
-use std::sync::atomic::AtomicBool;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+pub const MENU_SOCK_PATH: &str = "/run/astro/menu.sock";
+#[cfg(target_os = "linux")]
+pub const MENU_SHM_PATH: &str = "/dev/shm/astro_rt_menu";
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +24,21 @@ pub enum MenuInput {
     Back,
 }
 
-#[cfg(any(target_os = "linux", test))]
+impl MenuInput {
+    #[cfg(target_os = "linux")]
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Toggle),
+            1 => Some(Self::Up),
+            2 => Some(Self::Down),
+            3 => Some(Self::Ok),
+            4 => Some(Self::Back),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
 mod evdev_map {
     use super::MenuInput;
 
@@ -157,9 +171,9 @@ mod evdev_map {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 pub use evdev_map::Mapper;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 #[allow(unused_imports)]
 pub use evdev_map::ABS_Y;
 #[cfg(test)]
@@ -167,88 +181,126 @@ use evdev_map::{
     ABS_HAT0Y, BTN_SELECT, BTN_START, EV_ABS, EV_KEY, KEY_DOWN, KEY_LEFTALT, KEY_LEFTCTRL, KEY_TAB,
 };
 
-/// Watch every input device (hotplug rescans every 5 s) and send menu inputs
-/// to `tx`. `grab` asks the readers to take the devices exclusively.
-#[cfg(target_os = "linux")]
-pub fn spawn_readers(tx: tokio::sync::mpsc::UnboundedSender<MenuInput>, grab: Arc<AtomicBool>) {
-    use std::collections::HashSet;
-    use std::sync::Mutex;
+/// Update the menu grab flag immediately and sync `/dev/shm/astro_rt_menu`.
+pub fn set_grab(grab: &AtomicBool, active: bool) {
+    grab.store(active, Ordering::Release);
+    #[cfg(target_os = "linux")]
+    sync_grab_shm(std::path::Path::new(MENU_SHM_PATH), active);
+}
 
-    let open: Arc<Mutex<HashSet<std::path::PathBuf>>> = Arc::default();
-    std::thread::spawn(move || loop {
-        if let Ok(dir) = std::fs::read_dir("/dev/input") {
-            for entry in dir.flatten() {
-                let path = entry.path();
-                let is_event = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("event"));
-                if !is_event
-                    || !open
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(path.clone())
-                {
-                    continue;
-                }
-                let (tx, grab, open) = (tx.clone(), grab.clone(), open.clone());
-                std::thread::spawn(move || {
-                    if let Err(e) = read_device(&path, &tx, &grab) {
-                        tracing::debug!("input {} closed: {e}", path.display());
+#[cfg(target_os = "linux")]
+fn sync_grab_shm(shm_path: &std::path::Path, active: bool) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::AtomicU32;
+
+    if let Some(parent) = shm_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o644)
+        .open(shm_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(path = %shm_path.display(), "Failed to open menu grab shm: {e}");
+            return;
+        }
+    };
+    if file.metadata().map(|m| m.len() < 4).unwrap_or(true) {
+        if let Err(e) = file.set_len(4) {
+            tracing::warn!(path = %shm_path.display(), "Failed to size menu grab shm: {e}");
+            return;
+        }
+    }
+    // SAFETY: `file` is open for read/write with length >= 4; `mmap` returns page-aligned memory.
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            4,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        tracing::warn!(path = %shm_path.display(), "Failed to mmap menu grab shm");
+        return;
+    }
+    // SAFETY: `ptr` points to 4 valid page-aligned bytes of shared memory.
+    unsafe {
+        let atomic = &*(ptr as *const AtomicU32);
+        atomic.store(u32::from(active), Ordering::Release);
+        libc::munmap(ptr, 4);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn_readers_at(
+    sock_path: &std::path::Path,
+    shm_path: &std::path::Path,
+    tx: tokio::sync::mpsc::UnboundedSender<MenuInput>,
+    grab: Arc<AtomicBool>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    sync_grab_shm(shm_path, grab.load(Ordering::Acquire));
+
+    if let Some(dir) = sock_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::remove_file(sock_path);
+    let sock = match tokio::net::UnixDatagram::bind(sock_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(path = %sock_path.display(), "Menu bridge socket unavailable: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o660)) {
+        tracing::warn!(path = %sock_path.display(), "Failed to chmod menu socket: {e}");
+    }
+
+    Some(tokio::spawn(async move {
+        let mut buf = [0u8; 64];
+        loop {
+            match sock.recv(&mut buf).await {
+                Ok(n) if n >= 1 => {
+                    for &b in &buf[..n] {
+                        if let Some(input) = MenuInput::from_code(b) {
+                            if tx.send(input).is_err() {
+                                return;
+                            }
+                        }
                     }
-                    open.lock().unwrap_or_else(|e| e.into_inner()).remove(&path);
-                });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Menu bridge recv error: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
             }
         }
-        std::thread::sleep(std::time::Duration::from_secs(5));
-    });
+    }))
+}
+
+/// Listen for 1-byte menu datagrams from `astro_rt` and sync `/dev/shm/astro_rt_menu`.
+#[cfg(target_os = "linux")]
+pub fn spawn_readers(tx: tokio::sync::mpsc::UnboundedSender<MenuInput>, grab: Arc<AtomicBool>) {
+    let _ = spawn_readers_at(
+        std::path::Path::new(MENU_SOCK_PATH),
+        std::path::Path::new(MENU_SHM_PATH),
+        tx,
+        grab,
+    );
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn spawn_readers(_tx: tokio::sync::mpsc::UnboundedSender<MenuInput>, _grab: Arc<AtomicBool>) {}
-
-#[cfg(target_os = "linux")]
-fn read_device(
-    path: &std::path::Path,
-    tx: &tokio::sync::mpsc::UnboundedSender<MenuInput>,
-    grab: &AtomicBool,
-) -> std::io::Result<()> {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-
-    const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
-    // EVIOCGABS(ABS_Y): _IOR('E', 0x40 + ABS_Y, struct input_absinfo).
-    const EVIOCGABS_Y: libc::c_ulong = 0x8018_4541;
-
-    let mut file = std::fs::File::open(path)?;
-    let fd = file.as_raw_fd();
-    let mut absinfo = [0i32; 6];
-    // SAFETY: fd is open for the call and absinfo is input_absinfo-sized.
-    let y_range = (unsafe { libc::ioctl(fd, EVIOCGABS_Y, absinfo.as_mut_ptr()) } == 0
-        && absinfo[2] > absinfo[1])
-        .then_some((absinfo[1], absinfo[2]));
-    let mut mapper = Mapper::new(y_range);
-    let mut grabbed = false;
-    // struct input_event on 64-bit: timeval (16) + type u16 + code u16 + value i32.
-    let mut buf = [0u8; 24];
-    loop {
-        file.read_exact(&mut buf)?;
-        let want = grab.load(Ordering::Relaxed);
-        if want != grabbed {
-            // SAFETY: fd is open; EVIOCGRAB takes an int by value.
-            unsafe { libc::ioctl(fd, EVIOCGRAB, want as libc::c_int) };
-            grabbed = want;
-        }
-        let ev_type = u16::from_ne_bytes([buf[16], buf[17]]);
-        let code = u16::from_ne_bytes([buf[18], buf[19]]);
-        let value = i32::from_ne_bytes([buf[20], buf[21], buf[22], buf[23]]);
-        if let Some(input) = mapper.feed(ev_type, code, value) {
-            if tx.send(input).is_err() {
-                return Ok(());
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -288,5 +340,39 @@ mod tests {
         assert_eq!(m.feed(EV_ABS, ABS_Y, 255), Some(MenuInput::Down));
         assert_eq!(m.feed(EV_ABS, ABS_HAT0Y, -1), Some(MenuInput::Up));
         assert_eq!(m.feed(EV_ABS, ABS_HAT0Y, 0), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn menu_bridge_datagram_and_shm_grab() {
+        let dir = std::env::temp_dir().join(format!("astro-input-bridge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock_path = dir.join("menu.sock");
+        let shm_path = dir.join("astro_rt_menu");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let grab = Arc::new(AtomicBool::new(false));
+        let handle = spawn_readers_at(&sock_path, &shm_path, tx, grab.clone()).unwrap();
+
+        assert_eq!(std::fs::read(&shm_path).unwrap(), 0u32.to_ne_bytes());
+
+        let client = tokio::net::UnixDatagram::unbound().unwrap();
+        client.send_to(&[0, 1, 2, 3, 4], &sock_path).await.unwrap();
+        assert_eq!(rx.recv().await, Some(MenuInput::Toggle));
+        assert_eq!(rx.recv().await, Some(MenuInput::Up));
+        assert_eq!(rx.recv().await, Some(MenuInput::Down));
+        assert_eq!(rx.recv().await, Some(MenuInput::Ok));
+        assert_eq!(rx.recv().await, Some(MenuInput::Back));
+
+        grab.store(true, Ordering::Release);
+        sync_grab_shm(&shm_path, true);
+        assert_eq!(std::fs::read(&shm_path).unwrap(), 1u32.to_ne_bytes());
+
+        sync_grab_shm(&shm_path, false);
+        assert_eq!(std::fs::read(&shm_path).unwrap(), 0u32.to_ne_bytes());
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
