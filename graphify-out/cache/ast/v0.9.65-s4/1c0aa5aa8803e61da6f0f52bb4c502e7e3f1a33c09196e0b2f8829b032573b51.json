@@ -1,0 +1,1 @@
+{"nodes": [{"id": "pkg_beercade_hal", "label": "beercade-hal", "file_type": "code", "type": "package", "ecosystem": "cargo", "source_file": "shared/crates/beercade-hal/Cargo.toml", "source_location": "L1", "version": "0.1.0"}], "edges": []}

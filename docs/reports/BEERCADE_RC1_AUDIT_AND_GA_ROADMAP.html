@@ -1,0 +1,1184 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>B.E.E.R.C.A.D.E. RC1 Audit, Storage Hygiene & GA Execution Roadmap</title>
+<style>
+  :root {
+    --bg: #090d16;
+    --bg-elev: #0f1624;
+    --card: #111827;
+    --card-2: #162033;
+    --border: #1f2d45;
+    --border-strong: #2d4061;
+    --fg: #e5edf8;
+    --muted: #93a4bf;
+    --cyan: #22d3ee;
+    --emerald: #10b981;
+    --amber: #f59e0b;
+    --rose: #f43f5e;
+    --violet: #a78bfa;
+    --code-bg: #0b111e;
+    --shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    --radius: 12px;
+    --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  [data-theme="light"] {
+    --bg: #f4f7fb;
+    --bg-elev: #ffffff;
+    --card: #ffffff;
+    --card-2: #f0f4fa;
+    --border: #d8e1ee;
+    --border-strong: #b7c6db;
+    --fg: #0f172a;
+    --muted: #475569;
+    --cyan: #0284c7;
+    --emerald: #059669;
+    --amber: #d97706;
+    --rose: #e11d48;
+    --violet: #7c3aed;
+    --code-bg: #eef3f9;
+    --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  code, pre, .mono { font-family: var(--font-mono); }
+  code {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    padding: 1px 5px;
+    border-radius: 5px;
+    font-size: 12px;
+    color: var(--cyan);
+  }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  mark.hl { background: rgba(245, 158, 11, 0.35); color: var(--fg); padding: 0 2px; border-radius: 3px; }
+
+  /* Sticky Top Header */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: 0.02em; }
+  .brand-badge {
+    background: linear-gradient(135deg, var(--cyan), var(--emerald));
+    color: #06101b;
+    font-weight: 800;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+  }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .search-box {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px 10px;
+  }
+  .search-box input {
+    background: transparent;
+    border: 0;
+    outline: none;
+    color: var(--fg);
+    width: 220px;
+    font-size: 13px;
+  }
+  .btn {
+    background: var(--card-2);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 11px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .btn:hover { border-color: var(--cyan); }
+  .btn.active { background: color-mix(in srgb, var(--cyan) 18%, var(--card)); border-color: var(--cyan); color: var(--cyan); }
+  .btn-primary { background: var(--cyan); color: #05131f; border-color: var(--cyan); }
+  .btn-primary:hover { opacity: 0.9; }
+
+  /* Layout */
+  .shell {
+    display: grid;
+    grid-template-columns: 245px minmax(0, 1fr);
+    max-width: 1520px;
+    margin: 0 auto;
+    gap: 24px;
+    padding: 20px;
+  }
+  .rail {
+    position: sticky;
+    top: 72px;
+    align-self: start;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    box-shadow: var(--shadow);
+  }
+  .rail-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px 6px; font-weight: 700; }
+  .nav-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 10px;
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 3px;
+    border-left: 3px solid transparent;
+  }
+  .nav-link:hover { color: var(--fg); background: var(--card-2); text-decoration: none; }
+  .nav-link.active { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 12%, transparent); border-left-color: var(--cyan); font-weight: 600; }
+  .rail-meta {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  main { min-width: 0; display: flex; flex-direction: column; gap: 28px; }
+  section.panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px;
+    box-shadow: var(--shadow);
+  }
+  .sec-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+  }
+  .sec-head h2 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+  .sec-sub { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+  h3 { margin: 20px 0 10px; font-size: 15px; color: var(--fg); }
+
+  /* Hero & KPI */
+  .hero {
+    background: radial-gradient(circle at top right, color-mix(in srgb, var(--cyan) 16%, transparent), transparent 55%),
+                radial-gradient(circle at bottom left, color-mix(in srgb, var(--emerald) 12%, transparent), transparent 50%),
+                var(--card);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    padding: 24px;
+    box-shadow: var(--shadow);
+  }
+  .hero h1 { margin: 0 0 8px; font-size: 26px; letter-spacing: -0.02em; }
+  .hero-meta { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 12px; }
+  .kpi {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 13px 14px;
+  }
+  .kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; }
+  .kpi-val { font-size: 22px; font-weight: 800; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+  .kpi-note { font-size: 12px; color: var(--muted); }
+
+  /* Badges / Pills */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .p-pass, .p-safe, .p-yes { color: var(--emerald); background: color-mix(in srgb, var(--emerald) 14%, transparent); border-color: color-mix(in srgb, var(--emerald) 35%, transparent); }
+  .p-gap, .p-warn, .p-merge, .p-med { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
+  .p-risk, .p-high, .p-net, .p-block { color: var(--rose); background: color-mix(in srgb, var(--rose) 14%, transparent); border-color: color-mix(in srgb, var(--rose) 35%, transparent); }
+  .p-info, .p-missing, .p-run { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 14%, transparent); border-color: color-mix(in srgb, var(--cyan) 35%, transparent); }
+  .p-muted, .p-test { color: var(--muted); background: var(--card-2); border-color: var(--border); }
+
+  /* Cards & Grids */
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 14px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+  .subcard {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .subcard.clickable { cursor: pointer; transition: border-color 0.15s, transform 0.12s; }
+  .subcard.clickable:hover { border-color: var(--cyan); transform: translateY(-1px); }
+
+  /* Figure Cards */
+  .fig-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 14px 0;
+  }
+  .fig-wrap { position: relative; cursor: zoom-in; background: #070b13; }
+  .fig-wrap img { display: block; width: 100%; height: auto; max-height: 460px; object-fit: contain; margin: 0 auto; }
+  .fig-zoom-hint {
+    position: absolute; right: 12px; bottom: 12px;
+    background: rgba(9, 13, 22, 0.85); color: #e5edf8;
+    border: 1px solid #2d4061; border-radius: 6px; padding: 4px 9px; font-size: 11px; font-weight: 600;
+  }
+  .fig-cap { padding: 10px 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
+
+  /* Tables */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; margin-top: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 9px 11px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--card-2); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; position: sticky; top: 0; }
+  tr:last-child td { border-bottom: 0; }
+  tr:hover td { background: color-mix(in srgb, var(--cyan) 4%, transparent); }
+
+  /* Bars */
+  .bar-row { margin-bottom: 9px; }
+  .bar-meta { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; gap: 8px; }
+  .bar-track { height: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 999px; transition: width 0.3s ease; }
+
+  /* Filter/Tab Bars */
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 12px; }
+
+  /* Accordion */
+  .acc-item { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; background: var(--card-2); overflow: hidden; }
+  .acc-hdr {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 11px 14px; cursor: pointer; font-weight: 600;
+  }
+  .acc-hdr:hover { background: color-mix(in srgb, var(--cyan) 6%, transparent); }
+  .acc-body { display: none; padding: 0 14px 14px; border-top: 1px solid var(--border); font-size: 13px; }
+  .acc-item.open .acc-body { display: block; padding-top: 12px; }
+
+  /* Simulator */
+  .sim-grid { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(300px, 1.35fr); gap: 16px; }
+  .sim-toggle {
+    display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev);
+    margin-bottom: 6px; cursor: pointer; font-size: 12.5px;
+  }
+  .sim-toggle input { margin-top: 3px; accent-color: var(--cyan); }
+  .gauge-card { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+
+  /* Storage SVG */
+  .storage-flex { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 18px; align-items: center; }
+
+  /* Roadmap */
+  .phase-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 14px; }
+  .phase-pill {
+    text-align: left; padding: 10px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--card-2); color: var(--fg); cursor: pointer;
+  }
+  .phase-pill.active { border-color: var(--cyan); background: color-mix(in srgb, var(--cyan) 12%, var(--card-2)); }
+  .chk-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px; background: var(--bg-elev); cursor: pointer; }
+  .chk-row input { margin-top: 3px; accent-color: var(--emerald); }
+  .chk-row.done span { text-decoration: line-through; color: var(--muted); }
+
+  /* Lightbox & Toast */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 100; background: rgba(4, 7, 14, 0.92);
+    display: none; flex-direction: column; align-items: center; justify-content: center; padding: 20px;
+  }
+  .lightbox.open { display: flex; }
+  .lightbox-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; color: #e5edf8; }
+  .lightbox-stage { max-width: 94vw; max-height: 82vh; overflow: auto; border: 1px solid #2d4061; border-radius: 10px; background: #070b13; }
+  .lightbox-stage img { display: block; max-width: 92vw; max-height: 80vh; transition: transform 0.2s; }
+  .lightbox-stage.zoomed img { max-width: none; max-height: none; width: 150%; }
+  .lightbox-cap { color: #cbd5e1; font-size: 13px; margin-top: 10px; text-align: center; max-width: 900px; }
+  .toast {
+    position: fixed; bottom: 20px; right: 20px; z-index: 90;
+    background: var(--emerald); color: #04150f; font-weight: 700;
+    padding: 9px 14px; border-radius: 8px; display: none; box-shadow: var(--shadow);
+  }
+  .toast.show { display: block; }
+
+  @media (max-width: 980px) {
+    .shell { grid-template-columns: 1fr; }
+    .rail { position: static; display: flex; flex-wrap: wrap; gap: 6px; }
+    .rail-title, .rail-meta { width: 100%; }
+    .sim-grid, .storage-flex { grid-template-columns: 1fr; }
+  }
+  @media print {
+    .topbar, .rail, .btn, .tabs, .fig-zoom-hint { display: none !important; }
+    .shell { display: block; padding: 0; }
+    section.panel { break-inside: avoid; box-shadow: none; margin-bottom: 16px; }
+    .acc-body { display: block !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-badge">RC1 AUDIT</span>
+    <span>B.E.E.R.C.A.D.E. Engineering &amp; GA Completion Console</span>
+    <code title="Local verified commit on main">5757f34</code>
+  </div>
+  <div class="controls">
+    <div class="search-box">
+      <span>Search</span>
+      <input id="globalSearch" type="search" placeholder="Filter findings, files, symbols... (/)" />
+      <span id="searchCount" class="mono" style="font-size:11px;color:var(--muted);"></span>
+      <button id="clearSearch" class="btn" style="padding:2px 7px;">Clear</button>
+    </div>
+    <button id="themeToggle" class="btn" title="Toggle Dark/Light Theme">Theme: Dark</button>
+    <button id="printBtn" class="btn" title="Print or Save PDF">Print / PDF</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="rail" aria-label="Section navigation">
+    <div class="rail-title">Navigation</div>
+    <a class="nav-link active" href="#sec-overview">0. Executive Summary <span>KPI</span></a>
+    <a class="nav-link" href="#sec-rc1">1. RC1 Commit &amp; Tests <span>5757f34</span></a>
+    <a class="nav-link" href="#sec-graphify">2. Graphify &amp; Memory <span>-99.1%</span></a>
+    <a class="nav-link" href="#sec-latency">3. Latency Simulator <span>#1–#10</span></a>
+    <a class="nav-link" href="#sec-hygiene">4. Storage &amp; Hygiene <span>43.4 GiB</span></a>
+    <a class="nav-link" href="#sec-security">5. Security &amp; A/B Audit <span>GAPs</span></a>
+    <a class="nav-link" href="#sec-roadmap">6. 7-Phase GA Roadmap <span id="railProgress">0%</span></a>
+    <a class="nav-link" href="#sec-gallery">7. Visual Diagrams <span>4 PNG</span></a>
+    <div class="rail-meta">
+      <div><strong>Branch:</strong> <code>main</code> (local, unpushed)</div>
+      <div><strong>Audit Date:</strong> 2026-11-19</div>
+      <div><strong>OpenViking:</strong> Offline (local fallback)</div>
+      <div><strong>Press <code>/</code></strong> to focus search</div>
+    </div>
+  </aside>
+
+  <main>
+    <!-- 0. HERO / OVERVIEW -->
+    <section id="sec-overview" class="hero searchable-section">
+      <h1>B.E.E.R.C.A.D.E. RC1 Verification, Hygiene &amp; GA Completion Report</h1>
+      <div class="hero-meta">
+        <span>Commit: <code>5757f34727a22566111949f47f93bfc3e7b0a2f9</code></span>
+        <span>Workspace: <code>d:\data\dev\beercade</code></span>
+        <span>Scope: Phase-1 Baseline + Deep Audit (Zero Phase-2 Feature Code Written)</span>
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi">
+          <div class="kpi-label">Rust Tests (5 Crates)</div>
+          <div class="kpi-val" style="color:var(--emerald);">141 / 141</div>
+          <div class="kpi-note">0 failed; <code>astro-shell</code> check OK (Linux SDL2 link needed)</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Frontend Checks</div>
+          <div class="kpi-val" style="color:var(--emerald);">0 Errors</div>
+          <div class="kpi-note"><code>boss/kiosk_ui</code> + <code>website</code> svelte-check &amp; wrangler OK</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Graphify Index Size</div>
+          <div class="kpi-val" style="color:var(--cyan);">2.22 MB</div>
+          <div class="kpi-note">Down from 245.3 MB (-99.1%) · 2,037 nodes / 148 communities</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Storage Reclaimed</div>
+          <div class="kpi-val" style="color:var(--cyan);">43.43 GiB</div>
+          <div class="kpi-note">46,631,045,810 B purged; all <code>u-boot*</code> &amp; <code>*.mp4</code> preserved</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">Critical Security Gaps</div>
+          <div class="kpi-val" style="color:var(--rose);">4 + PIN XFF</div>
+          <div class="kpi-note">4 <code>netplay.rs</code> UDP vectors, PIN XFF bypass, `:8990` hijack, Slot B unbootable</div>
+        </div>
+      </div>
+
+      <div class="fig-card">
+        <div class="fig-wrap" onclick="openLightbox(0)">
+          <img src="./assets/01-system-topology.png" alt="B.E.E.R.C.A.D.E. Monorepo and Venue Topology" />
+          <span class="fig-zoom-hint">Click to Zoom</span>
+        </div>
+        <div class="fig-cap"><strong>Figure 1 — B.E.E.R.C.A.D.E. System Topology:</strong> Four architectural planes — A.S.T.R.O. cabinet nodes, B.O.S.S. venue hub, Shared HAL/buildfarm crates, and Website Cloudflare Pages/D1/Stripe edge.</div>
+      </div>
+    </section>
+
+    <!-- 1. RC1 COMMIT & VERIFICATION -->
+    <section id="sec-rc1" class="panel searchable-section">
+      <div class="sec-head">
+        <div>
+          <h2>1. RC1 / Phase-1 Verification &amp; Commit Record</h2>
+          <p class="sec-sub">Verified 47-file baseline commit on local <code>main</code> (<code>5757f34</code>, +4,718 / -1,186 lines) with invariant inspection and exclusion discipline.</p>
+        </div>
+        <span class="pill p-pass">141 RUST + 2 WEB CHECKS PASS</span>
+      </div>
+
+      <h3>1.1 Crate &amp; Frontend Verification Matrix (Click any card for details)</h3>
+      <div id="crateGrid" class="grid-3"></div>
+
+      <h3>1.2 Mandatory RC1 Invariants</h3>
+      <div class="grid-3" id="invariantGrid"></div>
+      <div id="invariantDrawer" class="subcard" style="margin-top:12px;display:none;"></div>
+
+      <h3>1.3 Committed Files vs. Exclusions &amp; Caveats</h3>
+      <div class="tabs" id="commitTabs">
+        <button class="btn active" data-ctab="committed">Committed in 5757f34</button>
+        <button class="btn" data-ctab="excluded">Excluded / Reverted</button>
+        <button class="btn" data-ctab="caveats">Working-Tree Caveats (6)</button>
+      </div>
+      <div id="commitTabBody"></div>
+    </section>
+
+    <!-- 2. GRAPHIFY & MEMORY SYNC -->
+    <section id="sec-graphify" class="panel searchable-section">
+      <div class="sec-head">
+        <div>
+          <h2>2. Graphify &amp; Memory Sync Delta</h2>
+          <p class="sec-sub">Source-only AST + Cargo graph rebuilt via <code>.graphifyignore</code>; compared against archived <code>2026-10-01</code> dump, OpenViking status, and doc drift.</p>
+        </div>
+        <span class="pill p-info">2,037 NODES · 3,941 EDGES</span>
+      </div>
+
+      <div class="grid-2">
+        <div class="subcard">
+          <h3 style="margin-top:0;">Graph Bloat Elimination</h3>
+          <div class="bar-row">
+            <div class="bar-meta"><span><code>graph.json</code> File Size (245.3 MB → 2.22 MB)</span><strong style="color:var(--emerald);">-99.10%</strong></div>
+            <div class="bar-track"><div class="bar-fill" style="width:100%;background:var(--rose);opacity:.35;"></div></div>
+            <div class="bar-track" style="margin-top:4px;"><div class="bar-fill" style="width:1.5%;background:var(--emerald);"></div></div>
+          </div>
+          <div class="bar-row" style="margin-top:14px;">
+            <div class="bar-meta"><span>Extracted Nodes (146,257 → 2,037)</span><strong style="color:var(--emerald);">-98.61%</strong></div>
+            <div class="bar-track"><div class="bar-fill" style="width:100%;background:var(--amber);opacity:.35;"></div></div>
+            <div class="bar-track" style="margin-top:4px;"><div class="bar-fill" style="width:2%;background:var(--cyan);"></div></div>
+          </div>
+          <div class="bar-row" style="margin-top:14px;">
+            <div class="bar-meta"><span>Communities (3,398 → 148)</span><strong style="color:var(--emerald);">-95.64%</strong></div>
+            <div class="bar-track"><div class="bar-fill" style="width:100%;background:var(--violet);opacity:.35;"></div></div>
+            <div class="bar-track" style="margin-top:4px;"><div class="bar-fill" style="width:4.4%;background:var(--violet);"></div></div>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin-top:12px;">
+            <strong>OpenViking &amp; Migration Status:</strong> OpenViking MCP (<code>https://viking.3hx.au/mcp</code>) is unattached in this session (proceeded locally per <code>AGENTS.md</code>). <code>GEMINI.md</code> does not exist; <code>AGENTS.md</code> serves as the effective successor while untracked <code>CLAUDE.md</code> remains a redundant 10-line subset.
+          </p>
+        </div>
+
+        <div class="subcard">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <h3 style="margin:0;">Top 15 God-Nodes (Edges)</h3>
+            <div class="tabs" id="godFilter" style="margin:0;">
+              <button class="btn active" data-g="all">All</button>
+              <button class="btn" data-g="boss">B.O.S.S.</button>
+              <button class="btn" data-g="astro">A.S.T.R.O.</button>
+              <button class="btn" data-g="shared">Shared</button>
+            </div>
+          </div>
+          <div id="godChart" style="margin-top:12px;"></div>
+        </div>
+      </div>
+
+      <h3>2.1 Graphify Query Traces &amp; Docs-vs-HEAD Drift</h3>
+      <div class="grid-2">
+        <div class="subcard">
+          <strong>Live Graphify Query Verification</strong>
+          <ul style="margin:8px 0 0;padding-left:18px;font-size:12.5px;">
+            <li><code>PinAttemptTracker</code>: connects <code>boss/src/state.rs:170</code> → <code>AppState:290</code>, <code>PinAttemptRecord:163</code>, <code>check_lockout()</code>, <code>record_failure_at()</code>.</li>
+            <li><code>astro_input_drain</code>: isolated in <code>astro/rt/src/input_evdev.cpp:241</code> &amp; <code>SpscRing::drain()</code> — <strong>0 call edges</strong> from Rust or Vulkan paths.</li>
+            <li><code>NodeTelemetry</code>: links <code>sample_telemetry():268</code> → <code>sample_input_jitter():221</code> (returns <code>0.0</code>); 0 links to TypeScript files.</li>
+          </ul>
+        </div>
+        <div class="subcard">
+          <strong>Docs vs. HEAD Discrepancies</strong>
+          <ul style="margin:8px 0 0;padding-left:18px;font-size:12.5px;">
+            <li><code>ROADMAP_x86_64.md:50-52</code> still lists optional thermals as open (already <code>Option&lt;f32&gt;</code>); <code>:135-193</code> targets ES-DE despite <code>astro-shell</code>.</li>
+            <li><code>OPTIMIZATION_BACKLOG.md:61-76</code> marks B1–B10 done, yet ARM64 B.O.S.S. is untested on Pi hardware and Slot B is unbootable.</li>
+            <li><code>ASTRO_CUSTOMER_SHELL_PLAN.md</code> Phase 1 landed on <code>astro</code>, while <code>boss</code> lacks purchase picker, <code>BRC-XXXX</code>, and <code>set_node_session()</code>.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. LATENCY CONSOLIDATION SIMULATOR -->
+    <section id="sec-latency" class="panel searchable-section">
+      <div class="sec-head">
+        <div>
+          <h2>3. Customer-Latency Consolidation Simulator &amp; Ranked Plan (#1–#10)</h2>
+          <p class="sec-sub">Toggle individual consolidations below to project customer-facing responsiveness gains derived from observed code timers, polling loops, and spawn paths.</p>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn" id="simBaseline">RC1 Baseline</button>
+          <button class="btn" id="simTop3">Quick Wins (#1–#3)</button>
+          <button class="btn btn-primary" id="simAll">Full GA Fast-Path (#1–#10)</button>
+        </div>
+      </div>
+
+      <div class="fig-card">
+        <div class="fig-wrap" onclick="openLightbox(1)">
+          <img src="./assets/02-latency-pipeline.png" alt="Customer Latency Consolidation Pipeline" />
+          <span class="fig-zoom-hint">Click to Zoom</span>
+        </div>
+        <div class="fig-cap"><strong>Figure 2 — Customer Latency Consolidation Pipeline:</strong> Transforming HTTP polling, batch download stalls, systemd restarts, double-VSync sleeps, and inert input drains into sub-frame native pipelines.</div>
+      </div>
+
+      <div class="sim-grid">
+        <div>
+          <h3 style="margin-top:0;">Select Consolidations to Model</h3>
+          <div id="simToggles"></div>
+        </div>
+        <div>
+          <h3 style="margin-top:0;">Modeled Customer-Facing Latency Telemetry</h3>
+          <div id="simGauges"></div>
+        </div>
+      </div>
+
+      <h3>3.1 Ranked Consolidation Deep-Dive (#1–#10)</h3>
+      <div id="latencyAccordion"></div>
+    </section>
+
+    <!-- 4. STORAGE & HYGIENE -->
+    <section id="sec-hygiene" class="panel searchable-section">
+      <div class="sec-head">
+        <div>
+          <h2>4. Storage Cleanup Ledger &amp; Tracked Dead-File Hygiene</h2>
+          <p class="sec-sub">Discretionary purge reclaimed <strong>46,631,045,810 B (43.43 GiB)</strong> of unmanaged/ignored OS images &amp; old Graphify caches while preserving every <code>u-boot*</code>, <code>*.mp4</code>, and tracked file.</p>
+        </div>
+        <button class="btn" id="copyGitRmBtn">Copy Safe-to-Purge git rm Preview</button>
+      </div>
+
+      <div class="storage-flex subcard">
+        <div id="storageDonutWrap" style="text-align:center;"></div>
+        <div id="storageLegend"></div>
+      </div>
+
+      <h3>4.1 Tracked Dead Files, Obsolete Scripts &amp; Conflicting Configs</h3>
+      <div class="tabs" id="hygieneTabs">
+        <button class="btn active" data-hf="ALL">All (12 Groups)</button>
+        <button class="btn" data-hf="YES">Safe to Purge (YES)</button>
+        <button class="btn" data-hf="NEEDS_MERGE">Needs Merge</button>
+        <button class="btn" data-hf="NO">Hold (Test/QEMU Coupled)</button>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Category</th><th>Tracked Path(s)</th><th>Proof / Conflict</th><th>Verdict</th></tr></thead>
+          <tbody id="hygieneTbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 5. SECURITY & A/B ROLLBACK -->
+    <section id="sec-security" class="panel searchable-section">
+      <div class="sec-head">
+        <div>
+          <h2>5. Security, Panic Surface, A/B Rollback &amp; RPi 5 16 KB Audit</h2>
+          <p class="sec-sub">Full audit of network-reachable UDP panics in <code>netplay.rs</code>, hardcoded image secrets, PIN lockout bypass, and dual-slot bootability gaps.</p>
+        </div>
+        <span class="pill p-risk">4 NET PANICS · PIN BYPASS · SLOT B UNBOOTABLE</span>
+      </div>
+
+      <div class="fig-card">
+        <div class="fig-wrap" onclick="openLightbox(2)">
+          <img src="./assets/03-security-ab-rollback.png" alt="Security Hardening and Dual-Slot A/B OTA Rollback" />
+          <span class="fig-zoom-hint">Click to Zoom</span>
+        </div>
+        <div class="fig-cap"><strong>Figure 3 — Security Hardening &amp; Dual-Slot A/B Rollback:</strong> GPT partition layout with verified OTA digest checks, atomic credit persistence, and four priority hardening targets.</div>
+      </div>
+
+      <div class="tabs" id="secTabs">
+        <button class="btn active" data-stab="panics">Netplay &amp; Runtime Panics</button>
+        <button class="btn" data-stab="secrets">Secrets &amp; Auth Exposures</button>
+        <button class="btn" data-stab="ab">A/B Boot Rollback Matrix</button>
+        <button class="btn" data-stab="page16k">RPi 5 16 KB Alignment</button>
+      </div>
+      <div id="secTabBody"></div>
+    </section>
+
+    <!-- 6. 7-PHASE GA ROADMAP -->
+    <section id="sec-roadmap" class="panel searchable-section">
+      <div class="sec-head">
+        <div>
+          <h2>6. Prioritized 7-Phase GA Execution Roadmap</h2>
+          <p class="sec-sub">Dependency-ordered phases with interactive exit-criteria checklists (persisted in <code>localStorage</code>).</p>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span id="gaBadge" class="pill p-info">0 / 21 Exit Criteria Checked</span>
+          <button class="btn" id="resetRoadmapBtn">Reset Progress</button>
+        </div>
+      </div>
+
+      <div class="bar-row" style="margin-bottom:14px;">
+        <div class="bar-meta"><span>Overall GA Exit-Criteria Completion</span><strong id="gaPct">0%</strong></div>
+        <div class="bar-track"><div id="gaBar" class="bar-fill" style="width:0%;background:linear-gradient(90deg,var(--cyan),var(--emerald));"></div></div>
+      </div>
+
+      <div class="fig-card">
+        <div class="fig-wrap" onclick="openLightbox(3)">
+          <img src="./assets/04-ga-roadmap-blueprint.png" alt="B.E.E.R.C.A.D.E. 7-Phase GA Execution Roadmap" />
+          <span class="fig-zoom-hint">Click to Zoom</span>
+        </div>
+        <div class="fig-cap"><strong>Figure 4 — 7-Phase GA Execution Roadmap:</strong> Critical path from ARM64 CI unblocking and security/A/B rollback through 1000 Hz Vulkan input, hardware frametime gates, Customer Shell Phase 2, ARM64 sign-off, and 24 h mixed-fleet venue acceptance.</div>
+      </div>
+
+      <div id="phaseStrip" class="phase-strip"></div>
+      <div id="phaseDetail" class="subcard"></div>
+    </section>
+
+    <!-- 7. IMAGE GALLERY -->
+    <section id="sec-gallery" class="panel searchable-section">
+      <div class="sec-head">
+        <div>
+          <h2>7. Architecture Visuals Gallery</h2>
+          <p class="sec-sub">All 4 generated 16:9 technical illustrations stored under <code>docs/reports/assets/</code>. Click any card to inspect full-screen.</p>
+        </div>
+      </div>
+      <div class="grid-2" id="galleryGrid"></div>
+    </section>
+  </main>
+</div>
+
+<!-- Lightbox Modal -->
+<div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="Image Zoom Modal">
+  <div class="lightbox-toolbar">
+    <button class="btn" id="lbPrev">Prev</button>
+    <button class="btn" id="lbNext">Next</button>
+    <button class="btn" id="lbZoom">Toggle 150% Zoom</button>
+    <button class="btn btn-primary" id="lbClose">Close (Esc)</button>
+  </div>
+  <div id="lbStage" class="lightbox-stage"><img id="lbImg" src="" alt="" /></div>
+  <div id="lbCap" class="lightbox-cap"></div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const IMAGES = [
+  { src: "./assets/01-system-topology.png", title: "01 — Monorepo & Venue Topology", cap: "Four connected planes: A.S.T.R.O. Cabinet Nodes, B.O.S.S. Venue Hub (:8080 / :9750 UDP), Shared HAL & Buildfarm, and Website Cloud Edge (Cloudflare D1 + Stripe)." },
+  { src: "./assets/02-latency-pipeline.png", title: "02 — Customer Latency Consolidation", cap: "Parallel comparison of current RC1 stalls vs. consolidated native fast path (WS push, 1st-ROM Picker, resident DRM handoff, 60 Hz VSync, 1000 Hz Vulkan khr_display)." },
+  { src: "./assets/03-security-ab-rollback.png", title: "03 — Security & Dual-Slot A/B Rollback", cap: "GPT partition layout with verified X-OTA-SHA256 staging, atomic credits.json persistence, and 4 priority hardening controls." },
+  { src: "./assets/04-ga-roadmap-blueprint.png", title: "04 — 7-Phase GA Execution Roadmap", cap: "Dependency-ordered execution phases from M1 ARM64 CI through M4/M5 mixed-architecture 24-hour venue burn-in." }
+];
+
+const CRATES = [
+  { name: "beercade-shared", status: "PASS", cls: "p-pass", summary: "16 passed, 0 failed", detail: "Wire contracts (NodeTelemetry, CabinetCommand, GameRef, CabinetEvent), auth, crypto, shell IPC." },
+  { name: "beercade-hal", status: "PASS", cls: "p-pass", summary: "9 passed, 0 failed", detail: "SoC/arch detection (x86_64, aarch64, rk3588, bcm2712), hwmon readers, A/B boot state." },
+  { name: "astro-daemon", status: "PASS", cls: "p-pass", summary: "66 passed, 0 failed", detail: "11 new ota.rs SHA-256 tests, atomic credit persistence & .bak recovery, command ACK, R3 static-IP checks. (31 Windows dead-code warnings in input/shell_ipc.)" },
+  { name: "astro-tune", status: "PASS", cls: "p-pass", summary: "5 passed, 0 failed", detail: "CPU performance governor, EPP, AllowedCPUs slice assignment, and cpu_dma_latency=0 tuning." },
+  { name: "boss-server", status: "PASS", cls: "p-pass", summary: "45 passed, 0 failed", detail: "PinAttemptTracker 5/60s lockout, GameCatalogue, Range streaming, netplay relay, and auth middleware." },
+  { name: "astro-shell", status: "LINK BLOCKED", cls: "p-gap", summary: "cargo check PASS · test link LNK1181", detail: "Compiles cleanly under cargo check; 5 tests in astro/shell/src/ui.rs:125-185 require Linux libsdl2-dev / SDL2.lib to link." },
+  { name: "boss/kiosk_ui", status: "PASS", cls: "p-pass", summary: "0 errors, 0 warnings", detail: "svelte-check verified admin Fleet Discovery & Rescue panel plus bossApi.ts additions." },
+  { name: "website", status: "PASS", cls: "p-pass", summary: "0 errors, 0 warnings", detail: "wrangler types --check up to date; svelte-check clean across Cloudflare Pages + D1 + Stripe routes." }
+];
+
+const INVARIANTS = [
+  { name: "Mandatory X-OTA-SHA256 & Cleanup", badge: "PASS", cls: "p-pass", loc: "astro/daemon/src/ota.rs:45-142", body: "Rejects missing, empty, or non-UTF-8 X-OTA-SHA256 headers and deletes staging_path. Calls dest.sync_all() (:112), verifies size + Content-Length (:122-132), enforces constant_time_eq SHA-256 (:135-142), and cleans staging_path on every error. Minor gap: execute_ota_update (:164-168) leaves staging_path if dd/commit_boot_slot fails post-staging." },
+  { name: "Atomic Credit Persistence + .bak", badge: "PASS", cls: "p-pass", loc: "astro/daemon/src/main.rs:57-193", body: "Writes credits.json.tmp, flushes via sync_all() (:90), drops handle (:92), atomically renames (:96), and backs up to credits.json.bak (:99). load_credits performs 3-tier recovery: primary -> .bak self-heal (:164) -> zero default (:192). Minor note: .bak copy uses fs::copy rather than tmp+sync+rename." },
+  { name: "Operator PIN Rate Limiting (5 / 60s)", badge: "GAP", cls: "p-gap", loc: "boss/src/main.rs:171; routes.rs:158-273", body: "PinAttemptTracker (state.rs:145-269) enforces 5 failures / 60s lockout with 429 Retry-After: 60. HOWEVER, boss/src/main.rs:171 calls axum::serve(listener, app) without into_make_service_with_connect_info::<SocketAddr>(), and routes.rs:162-185 trusts client-spoofable CF-Connecting-IP / X-Forwarded-For / X-Real-IP headers—allowing trivial lockout bypass by rotating XFF headers." }
+];
+
+const COMMIT_TABS = {
+  committed: [
+    "Cargo.lock, AGENTS.md, .graphifyignore",
+    "astro/daemon/Cargo.toml, src/{main,ota,discovery}.rs",
+    "astro/shell/src/{main,ui}.rs",
+    "astro/platform/aarch64/{mkinitcpio.conf, udev rules, 4 systemd units}",
+    "boss/Cargo.toml, src/{main,routes,state,catalogue,discovery}.rs",
+    "boss/kiosk_ui/src/{lib/bossApi.ts, routes/admin/+page.svelte}",
+    "boss/platform/common/rootfs/usr/lib/{systemd/system/boss-*.service, tmpfiles.d/boss.conf}",
+    "shared/buildfarm/{aarch64,x86_64}/{build_image.sh, container_build.sh, payloads/*.conf}",
+    "shared/platform/universal-aarch64/boot/{cmdline.txt, config.txt, extlinux/extlinux.conf, *.dtb, overlays/*.dtbo}",
+    "Removed 6 archived root docs (moved to completed_prompts/)"
+  ],
+  excluded: [
+    "Reverted CRLF-only noise: astro/launcher/astro_kms_launcher.sh, boss/kiosk_ui/package-lock.json",
+    "Security exclusions: boss/.../getty@tty2.service.d/autologin.conf & serial-getty@ttyS0.service.d/autologin.conf",
+    "Large binaries: universal-aarch64/boot/Image (16.08 MB), u-boot-rockchip.bin (9.64 MB), ASTRO_rc1.mp4 (102.71 MB)",
+    "Generated / scratch trees: graphify-out/, .agents/teamwork/, completed_prompts/, empirical_challenge_*.py",
+    "Session logs / prompts: ORIGINAL_REQUEST.md, CLAUDE.md, beercade_project_completion_handover.md"
+  ],
+  caveats: [
+    "astro/daemon/src/main.rs:1051 defaults to http://boss:8989, whereas boss-server.service:12 binds BOSS_PORT=8080.",
+    "astro/daemon/src/discovery.rs:79-124,193-240 lets unauthenticated LAN HTTP/UDP callers overwrite boss_url and boss_token.",
+    "boss/src/discovery.rs:225-235 inserts synthetic cpu_temp_c: Some(42.0) / gpu_temp_c: Some(40.0) before first heartbeat.",
+    "shared/buildfarm/aarch64/build_image.sh:34-74 reuses pre-existing binaries/frontends in out/bin-*-aarch64 & fe-*-aarch64.",
+    "boss/platform/common/rootfs/usr/lib/tmpfiles.d/boss.conf:9 sets /data/beercade/logs mode 0777 root root.",
+    "shared/platform/universal-aarch64/boot/config.txt:13,17 sets kernel=kernel8.img while shipping Image beside it."
+  ]
+};
+
+const GOD_NODES = [
+  { name: "AppState", edges: 45, group: "boss", loc: "boss/src/state.rs" },
+  { name: "GameRef", edges: 34, group: "shared", loc: "beercade-shared" },
+  { name: "DaemonSharedState", edges: 31, group: "astro", loc: "astro/daemon/src/main.rs" },
+  { name: "test_app()", edges: 27, group: "boss", loc: "boss/src/routes.rs" },
+  { name: "execute_cabinet_command()", edges: 23, group: "astro", loc: "astro/daemon/src/main.rs" },
+  { name: "getApiBase()", edges: 22, group: "boss", loc: "boss/kiosk_ui/src/lib/bossApi.ts" },
+  { name: "RequireRpcToken", edges: 21, group: "boss", loc: "boss/src/routes.rs" },
+  { name: "Session", edges: 21, group: "astro", loc: "astro/daemon/src/session.rs" },
+  { name: "RollbackSession", edges: 20, group: "astro", loc: "astro/daemon/src/netplay.rs" },
+  { name: "RollbackSession<C>", edges: 20, group: "astro", loc: "astro/daemon/src/netplay.rs" },
+  { name: "SpscRing", edges: 19, group: "astro", loc: "astro/rt/include/astro_rt/spsc_ring.hpp" },
+  { name: "main()", edges: 19, group: "shared", loc: "workspace entrypoints" },
+  { name: "stage_ota_payload()", edges: 19, group: "astro", loc: "astro/daemon/src/ota.rs" },
+  { name: "BossPlugin", edges: 18, group: "boss", loc: "boss/src/plugins.rs" },
+  { name: "launch_game()", edges: 18, group: "astro", loc: "astro/daemon/src/main.rs" }
+];
+
+const LATENCY_ITEMS = [
+  { rank: 1, title: "Push CabinetCommand & Theme via WS_TELEMETRY", area: "Session / Command Delivery", loc: "astro/daemon/src/main.rs:1316-1516; boss/src/ws_telemetry.rs:19-88", impact: "-1,000 ms avg command lag; -3 to 15 s attract startup", cur: "Polls GET /commands every 2s (+ 3s boot sleep, 15s AttractNeeded retry, 60s theme poll) despite open WebSocket.", fix: "Multiplex CabinetCommand and theme_changed over the existing bidirectional WS_TELEMETRY socket via per-node mpsc::Sender in AppState." },
+  { rank: 2, title: "Incremental 1st-ROM Picker Unlock + Streaming SHA-256", area: "ROM Staging & Hot-Swap", loc: "staging.rs:125-184; session.rs:105-119; boss/src/routes.rs:1056-1080", impact: "Unblocks Picker immediately on 1st ready ROM + eliminates 2x disk read", cur: "stage_all awaits .buffered(2) across all session ROMs before unlocking Picker, re-reads files to hash, and serves 4 KiB ReaderStream.", fix: "Stream-hash chunks during write via shared beercade-shared hasher; emit per-game ready event to unlock Picker; use 1 MiB ReaderStream::with_capacity." },
+  { rank: 3, title: "Resident astro-shell (SIGSTOP/SIGCONT) & Direct RetroArch Spawn", area: "Game Launch & Teardown", loc: "astro/daemon/src/main.rs:383-416,590; astro_kms_launcher.sh:26-102", impact: "-500 ms to -2.5 s per game swap + removes 1 s attract gap", cur: "Runs systemctl stop/start astro-frontend, /bin/sh DRM probe subshells, killall -TERM, and 1s attract sleep.", fix: "Probe DRM via beercade-hal, spawn /usr/bin/retroarch directly tracking Child PID, and keep astro-shell resident via SIGSTOP/SIGCONT DRM handoff." },
+  { rank: 4, title: "Wire astro_rt 1000 Hz SPSC Ring into Vulkan khr_display", area: "Input-to-Photon (1000 Hz)", loc: "0001-drm-astro-rt...patch:28-49; input_evdev.cpp:80-258; input.rs:155-228", impact: "Eliminates +4–16 ms udev polling jitter & pause key leaks", cur: "astro_input_start() never called; drm_gfx.c discards drain return; daemon polls /dev/input every 5s; sample_input_jitter() returns 0.0.", fix: "Call astro_input_start() + astro_input_button()/axis() in RetroArch udev/Vulkan khr_display path with inotify hotplug & real p99 drain telemetry." },
+  { rank: 5, title: "Type=notify sd_notify Boot Readiness & Cgroup Direct Write", area: "Boot-to-Attract Sequence", loc: "boss-kiosk.service:31-40; astro-tune/main.rs:121-162; astro-frontend.service:7-34", impact: "-1 to -4 s cold boot-to-attract / kiosk ready", cur: "Type=simple units + 60x curl/sleep 1 kiosk loop + 4x systemctl forks + getty@tty1 ordering wait.", fix: "Emit sd_notify(READY=1) from boss-server & astro-tune; write /sys/fs/cgroup cpuset directly; drop shell wrappers." },
+  { rank: 6, title: "Remove sleep(16ms) After present_vsync() + watch shell_ipc", area: "Customer Shell Pacing", loc: "astro/shell/src/main.rs:526-581; shell_ipc.rs:111-133", impact: "Doubles picker UI 30 Hz -> 60 Hz (-16.7 ms) + <1 ms IPC push", cur: "Calls thread::sleep(16ms) after VSync-blocked present(); shell_ipc snapshots state_arc every 500 ms.", fix: "Delete sleep(16ms) on VSync loop; drive shell_ipc.rs from tokio::sync::watch::Receiver<ShellFrame>." },
+  { rank: 7, title: "Persistent Connected RetroArch UDP Socket & Local Pause State", area: "In-Game OSD & Pause", loc: "overlay.rs:317-353; astro/daemon/src/main.rs:1420-1527", impact: "-250 ms blocking pause delay + removes socket churn", cur: "Binds 127.0.0.1:0 per command; awaits 250 ms GET_STATUS before PAUSE_TOGGLE; 1s sleep drift.", fix: "Keep one connected UdpSocket in overlay::RetroArch, track daemon pause state locally, and use interval_at." },
+  { rank: 8, title: "Event-Driven Venue SSE & In-Place /admin State Patching", area: "Kiosk / Operator UI Push", loc: "boss/src/main.rs:34-75; admin/+page.svelte:300-313; tv/+page.svelte:192-194", impact: "-500 ms avg tap-to-UI lag + removes HTTP refetch storms", cur: "1s venue SSE tick; /admin fires 4 HTTP GETs on every SSE event; website retains legacy 3s mock stream.", fix: "Publish venue SSE immediately on mutations; patch Svelte $state from SSE payloads; delete website /api/telemetry/stream." },
+  { rank: 9, title: "Read UDP BEERCADE_NODE_ANNOUNCE Replies in Discovery", area: "Fleet Discovery Probing", loc: "boss/src/discovery.rs:88,350-407", impact: "Cuts rescue scan ~3.6 s+ -> <20 ms on LAN", cur: "Sends UDP BEERCADE_PROBE, drops socket without recv_from(), then HTTP-scans ~260 IPs at 450 ms timeout.", fix: "recv_from BEERCADE_NODE_ANNOUNCE on probe socket, HTTP-connecting only to responders & ARP peers." },
+  { rank: 10, title: "Consolidate Streaming SHA-256, Themes, typeshare & HAL", area: "Shared Contracts & HAL", loc: "beercade-shared; telemetry.ts (3x); ui_theme.rs; pwm_fan.sh; ota.rs:183-235", impact: "Eliminates wire drift, bash forks, and stale hardcoded UI game lists", cur: "3x SHA-256 copies, 4x palettes, 3x manually drifted TS files, bash sleep 3 fan script, ota.rs df/dd shells.", fix: "Move SHA-256 + palettes + typeshare TS generation to beercade-shared; native statvfs & PWM fan control to beercade-hal." }
+];
+
+const HYGIENE_ROWS = [
+  { cat: "ES-DE Remnants", paths: "astro/emulators/frontend/{boot_esde.sh,es_systems.cfg,beercade_neon_theme/theme.xml}, es-de/build_x86_64.sh, astro/rootfs/etc/emulationstation/es_systems.cfg, astro/platform/x86_64/.../es_systems.cfg, astro/rootfs/root/ES-DE/* (4), astro/rootfs/root/ROMs", proof: "0 active callers (astro-shell replaced ES-DE); still copied into ARM rootfs by overlay; ROMs is broken stub.", verdict: "YES", rm: ["astro/emulators/frontend/boot_esde.sh","astro/emulators/frontend/es_systems.cfg","astro/emulators/frontend/beercade_neon_theme/theme.xml","astro/emulators/frontend/es-de/build_x86_64.sh","astro/rootfs/etc/emulationstation/es_systems.cfg","astro/platform/x86_64/rootfs/etc/emulationstation/es_systems.cfg","astro/rootfs/root/ROMs"] },
+  { cat: "Obsolete Helper Scripts", paths: "astro/platform/rk3588/{mali_mpp_rga.sh,pwm_fan.sh,rk3588_optimizer.sh}, astro/emulators/shaders/shader_precompile.sh", proof: "0 active callers; superseded by astro-tune / astro-daemon.", verdict: "YES", rm: ["astro/platform/rk3588/mali_mpp_rga.sh","astro/platform/rk3588/pwm_fan.sh","astro/platform/rk3588/rk3588_optimizer.sh","astro/emulators/shaders/shader_precompile.sh"] },
+  { cat: "Legacy Buildfarm & Initcpio", paths: "astro/initcpio/* (3), astro/scripts/* (4), shared/buildfarm/{Dockerfile.buildfarm,setup_buildfarm_env.sh,scripts/*.sh} (15), shared/arch/provisioning/* (2)", proof: "Superseded by shared/buildfarm/{x86_64,aarch64}/build_image.sh + astro_overlay.", verdict: "YES", rm: [] },
+  { cat: "Broken VM Scripts", paths: "boss/emulate_boss.ps1, boss/emulate_boss.sh", proof: "Hardcode missing BOSS/ & ASTRO/ paths; superseded by shared/tests/verify_qemu_*.{sh,py}.", verdict: "YES", rm: ["boss/emulate_boss.ps1","boss/emulate_boss.sh"] },
+  { cat: "Symlink Stubs & Dup Net/Udev", paths: "astro/rootfs/etc/systemd/system/multi-user.target.wants/* (4), boss-static-net.service, rk3588/udev/99-beercade-gamepad.rules, shared/arch/systemd/* (2)", proof: ".wants stubs excluded during build (--exclude=*.wants); duplicate active rules/mdns.", verdict: "YES", rm: ["astro/rootfs/etc/systemd/system/boss-static-net.service","astro/platform/rk3588/udev/99-beercade-gamepad.rules","shared/arch/systemd/mdns.conf","shared/arch/systemd/10-wired.network"] },
+  { cat: "Coupled Net Script", paths: "astro/rootfs/usr/local/bin/boss_static_net.sh", proof: "Unit disabled, but asserted by astro/daemon/src/main.rs:2085-2094.", verdict: "NO", rm: [] },
+  { cat: "3-Way RK3588 RetroArch Conflict", paths: "astro/rt/deploy/retroarch_rk3588.cfg, astro/rootfs/root/.config/retroarch/retroarch.cfg vs astro/emulators/configs/retroarch_rk3588.cfg; astro/rootfs/etc/retroarch.cfg", proof: "Overlaid root/.config/retroarch/retroarch.cfg sets audio_driver=\"null\" (mutes ARM!). Only emulators/configs/retroarch_rk3588.cfg uses vulkan/khr_display/alsa.", verdict: "NEEDS_MERGE", rm: ["astro/rootfs/etc/retroarch.cfg"] },
+  { cat: "Conflicting B.O.S.S. Units", paths: "boss/deploy/{boss-kiosk.service,boss-server.service,install_boss.sh}", proof: "Port 8989, User=root, --disable-gpu vs active boss/platform/common/rootfs (8080, boss/kiosk, sandboxed).", verdict: "YES", rm: ["boss/deploy/boss-kiosk.service","boss/deploy/boss-server.service","boss/deploy/install_boss.sh"] },
+  { cat: "Conflicting ARM Boot Cfgs", paths: "astro/rootfs/boot/{cmdline,config}.txt, boss/platform/aarch64/boot/{cmdline,config}.txt, astro/platform/rk3588/extlinux.conf", proof: "Target ext4 / kernel_2712.img; superseded by shared/platform/universal-aarch64/boot/.", verdict: "YES", rm: ["astro/rootfs/boot/cmdline.txt","astro/rootfs/boot/config.txt","boss/platform/aarch64/boot/cmdline.txt","boss/platform/aarch64/boot/config.txt","astro/platform/rk3588/extlinux.conf"] },
+  { cat: "Legacy Pi 5 Boot Assets", paths: "boss/boot_assets/*", proof: "DTBs duplicate universal-aarch64; cmdline/config still referenced by verify_qemu_bcm2712.py.", verdict: "NO", rm: [] },
+  { cat: "Dup Lockfiles & Litter", paths: "boss/Cargo.lock, shared/crates/beercade-shared/Cargo.lock, {boss/kiosk_ui,website}/src/lib/index.ts, 3 .directory files", proof: "Root Cargo.lock governs --locked CI builds; template/KDE files unused.", verdict: "YES", rm: ["boss/Cargo.lock","shared/crates/beercade-shared/Cargo.lock","boss/kiosk_ui/src/lib/index.ts","website/src/lib/index.ts","astro/emulators/frontend/.directory","astro/emulators/shaders/.directory","website/.directory"] },
+  { cat: "Drifted Shared TS Contract", paths: "shared/proto/telemetry.ts", proof: "0 TS importers; drifts from beercade-shared (cpu_temp_c: number vs Option<f32>).", verdict: "NEEDS_MERGE", rm: [] }
+];
+
+const PANICS = [
+  { loc: "astro/daemon/src/netplay.rs:1203", expr: "base_frame + i as u32", reach: "REACHABLE_NETWORK", vec: "Packet::Input with base_frame = u32::MAX and inputs.len() >= 2 panics on overflow.", fix: "checked_add(i as u32)" },
+  { loc: "astro/daemon/src/netplay.rs:1396,1028,1060,1450,1497", expr: "self.current_frame = g; f + 1", reach: "REACHABLE_NETWORK", vec: "Packet::StateChunk frame = u32::MAX overflows on next frame_tick().", fix: "Reject frame >= u32::MAX - 3600; checked_add" },
+  { loc: "astro/daemon/src/netplay.rs:695,701,1159,1165", expr: "a - b, (-step) as u64, next_deadline -= ...", reach: "REACHABLE_NETWORK", vec: "Spoofed Pong t2/t3 timestamps trigger i64 overflow or TokioInstant underflow.", fix: "i128 diff, clamp step_us, checked_sub" },
+  { loc: "astro/daemon/src/netplay.rs:1359-1379", expr: "Vec::with_capacity(rx.total * state_chunk_size)", reach: "REACHABLE_NETWORK", vec: "total_chunks=0 triggers empty core.load(&[]) DoS; 65535 overflows capacity / OOM.", fix: "Reject 0 or > MAX_CHUNKS; checked_mul" },
+  { loc: "astro/daemon/src/netplay.rs:575,581,588,1301", expr: "% self.slots.len(), / state_chunk_size", reach: "REACHABLE_RUNTIME", vec: "Div-by-zero panic if history_frames == 0 or state_chunk_size == 0.", fix: "Clamp .max(1) + u16::try_from" },
+  { loc: "astro/daemon/src/netplay.rs:259-269,407,490,986-1378", expr: "12 .unwrap()/.expect() & &img[..n]", reach: "REACHABLE_RUNTIME", vec: "Invariant-guarded Cursor, slot_mut().expect(), rx.take().unwrap(), parse().unwrap().", fix: ".get(..), let Some(...), SocketAddr::from" },
+  { loc: "astro/daemon/src/netplay.rs:1779-2030", expr: "22 .unwrap()/.expect() calls", reach: "TEST_ONLY", vec: "Scoped inside #[cfg(test)] unit tests only.", fix: "Keep as test assertions" },
+  { loc: "astro/daemon/src/input.rs:168,176", expr: "open.lock().unwrap()", reach: "REACHABLE_RUNTIME", vec: "Mutex poison panic if evdev reader thread crashes.", fix: "unwrap_or_else(PoisonError::into_inner)" },
+  { loc: "astro/daemon/src/main.rs:1177,1273; boss/src/main.rs:166,171", expr: "panic!(ASTRO_NETPLAY_PEER), bind .unwrap()", reach: "REACHABLE_RUNTIME", vec: "Startup port bind or bad env crash (boss/src has 0 network-reachable panics).", fix: "Return Result; log & skip invalid peer env" }
+];
+
+const SECRETS = [
+  { loc: "astro/platform/x86_64/data/beercade/astro.env:6", kind: "BOSS_RPC_TOKEN", val: "beercade-dev-token baked into x86_64 & aarch64 DATA images.", risk: "HIGH" },
+  { loc: "boss/platform/common/data/beercade/boss.env:3-5", kind: "BOSS_RPC/NODE_TOKEN + PIN", val: "beercade-dev-token (shared RPC & node) + BOSS_OPERATOR_PIN=898900.", risk: "HIGH" },
+  { loc: "boss/src/state.rs:89-111", kind: "Fallback PIN & Journal Leak", val: "Hardcoded \"898900\" fallback; node token collapses to RPC token; logs live RPC token via tracing::warn!.", risk: "HIGH" },
+  { loc: "boss/kiosk_ui/src/lib/bossApi.ts:800,821; PinKeypadModal.svelte:126", kind: "Client Offline Bypass", val: "Accepts '898900' -> boss_sess_preview_offline or any token len >= 6 offline.", risk: "MED" },
+  { loc: "website/wrangler.jsonc:14; worker-configuration.d.ts:8", kind: "EDGE_INGEST_TOKEN", val: "Committed plaintext \"bk-dev-edge-token-2026\" in wrangler.jsonc vars.", risk: "HIGH" },
+  { loc: "boss/src/main.rs:171; boss/src/routes.rs:158-190", kind: "PIN Rate-Limit Bypass", val: "Omits into_make_service_with_connect_info + trusts client-spoofable XFF/CF-Connecting-IP headers.", risk: "HIGH" },
+  { loc: "astro/daemon/src/discovery.rs:79-124,193-240", kind: "Unauthenticated :8990 Takeover", val: "Any LAN host can overwrite boss_url & boss_token via HTTP POST or UDP BEERCADE_PROBE.", risk: "HIGH" },
+  { loc: "boss.conf:9; untracked autologin.conf", kind: "Rootfs Permissions / Autologin", val: "/data/beercade/logs mode 0777 root:root; excluded autologin.conf grants root shell on tty2/ttyS0.", risk: "HIGH" }
+];
+
+const PAGE16K = [
+  { area: "Kernel 16 KB Config", loc: "boss/configs/bcm2712_boss_defconfig:11-12", status: "SAFE", detail: "CONFIG_ARM64_16K_PAGES=y & CONFIG_ARM64_PAGE_SHIFT=14." },
+  { area: "AArch64 Image Kernel", loc: "shared/buildfarm/aarch64/container_build.sh:20,140; config.txt:17", status: "RISK", detail: "Pulls Arch 4 KB kernel8.img instead of 16 KB kernel_2712.img." },
+  { area: "Rust / C++ Linker Alignment", loc: "Cargo.toml; .cargo/config.toml; aarch64-toolchain.cmake", status: "MISSING", detail: "Omits -Wl,-z,max-page-size=16384 (relies on GNU ld 64 KB default; unsafe under lld)." },
+  { area: "Allocator (no jemalloc)", loc: "Cargo.toml; astro/daemon/Cargo.toml; boss/Cargo.toml", status: "SAFE", detail: "Uses glibc system allocator; avoids 4 KB compile-time jemalloc crashes." },
+  { area: "astro/rt C++ SpscRing", loc: "astro/rt/src/input_evdev.cpp:139-143; spsc_ring.hpp:40", status: "SAFE", detail: "alignas(64) + mlockall; zero 4096 mmap/mprotect calls." },
+  { area: "Mupen64Plus-Next Dynarec", loc: "shared/buildfarm/scripts/build_cores.sh:59-70", status: "RISK", detail: "Clones master with no ALIGN(16384) patch; verify_16kb_pages_m3.py skips if .so absent." },
+  { area: "SquashFS & GPT Layout", loc: "container_build.sh:167,189-198", status: "SAFE", detail: "128 KiB SquashFS blocks (8x 16 KB) & 1 MiB GPT partition alignment (64x 16 KB)." }
+];
+
+const ROADMAP = [
+  { id: 1, title: "M1 ARM64 CI & Toolchain Unblock", files: ".forgejo/workflows/ci.yml, aarch64/build_image.sh, astro/daemon/src/main.rs:2085", desc: "Install libsdl2-dev + libsdl2-ttf-dev in CI, link astro-shell & astro_rt CMake tests across [x86_64, arm64], stop stale out/ binary reuse, and clean tracked dead ES-DE files.", checks: ["x86_64 + arm64 Forgejo Rust matrix green with --locked (all 6 crates)", "astro-shell ui.rs SDL2 tests + astro_rt CMake tests execute in CI", "Tracked ES-DE/legacy files & boss_static_net.sh test pruned cleanly"] },
+  { id: 2, title: "A/B Rollback, Security Hardening & Secret Rotation", files: "netplay.rs, boss/src/{main,routes,state}.rs, astro/daemon/src/{discovery,ota}.rs, wrangler.jsonc", desc: "Patch 4 netplay UDP panic vectors, wire ConnectInfo + strip spoofable XFF trust, authenticate :8990 discovery, replace dev tokens/PINs with first-boot CSPRNG provisioning, and add systemd-boot +3 / tryboot / U-Boot bootcount.", checks: ["Adversarial UDP fuzz tests pass with 0 panics in netplay.rs", "PIN 5/60s lockout holds under rotated X-Forwarded-For + unauthenticated :8990 returns 401", "Simulated failed OTA boot automatically rolls back to Slot A on x86_64 & ARM64"] },
+  { id: 3, title: "astro_rt 1000 Hz Vulkan khr_display Wiring", files: "astro/rt/, RetroArch patches, astro/daemon/src/{input,main}.rs", desc: "Start astro_input_start() with CAP_SYS_NICE, replace inert drm_gfx.c drain with udev/Vulkan khr_display SPSC consumer, add inotify hotplug & EV_ABS scaling, and stream real p99 jitter.", checks: ["RetroArch logs active astro_rt SPSC ring consumer under Vulkan khr_display", "Oscilloscope / evtest delta proves <1 ms wake-to-vblank jitter", "Live non-zero input_jitter_p99_us arrives in B.O.S.S. telemetry"] },
+  { id: 4, title: "M3 Hardware Frametime Gate & Latency Consolidation", files: "astro/daemon/src/{main,staging,overlay,shell_ipc}.rs, astro/shell, boss/src/{main,discovery}.rs", desc: "Fix :8080 default port & synthetic 42C temps, merge RK3588 RetroArch configs (alsa), ship Consolidations #1–#10 (WS push, 1st-ROM Picker, resident DRM handoff, 60 Hz shell, sd_notify), and run benchmark_frametimes.py.", checks: ["Cold boot-to-attract < 5 s and cached game swap < 500 ms", "astro-shell runs steady 60 Hz with watch-driven IPC", "benchmark_frametimes.py achieves p99 <= 16.7 ms on AMD, Intel & NVIDIA hardware"] },
+  { id: 5, title: "Customer Shell Phase 2, typeshare & Stripe Fulfillment", files: "beercade-shared, boss/src/{plugins,routes,catalogue}.rs, boss/kiosk_ui, website/src/routes/api/", desc: "Generate TS types via typeshare, wire real SHA-256 ROMs + BRC-XXXX lookup + purchase picker + set_node_session(), live UpdateSession + grace top-up + LRU ISO cache + full patron wipe, and Stripe webhook fulfillment.", checks: ["typeshare CI check passes with zero manual telemetry.ts drift", "Stripe webhook / Kiosk purchase -> BRC-XXXX -> live game swap & top-up E2E green", "Session end wipes all patron ROMs, saves, states, and screenshots"] },
+  { id: 6, title: "ARM64 / RPi 5 16 KB & RK3588 Parity Sign-Off", files: "shared/buildfarm/aarch64/payloads/astro.conf, universal-aarch64/boot/config.txt, build_cores.sh, beercade-hal", desc: "Build pinned RetroArch v1.22.2 + astro_rt + astro-shell + cores (FBNeo, SwanStation, Mupen64Plus ALIGN(16384)) on ARM64; ship 16 KB kernel_2712.img + max-page-size=16384; move PWM fan control into beercade-hal.", checks: ["Universal aarch64 images boot cleanly on RPi 4, RPi 5 & Radxa Rock 5C", "RPi 5 reports getconf PAGE_SIZE == 16384 and runs Mupen64Plus JIT without EINVAL", "Rock 5C delivers HDMI audio (alsa) and Vulkan rendering"] },
+  { id: 7, title: "M4 Governance & M5 E2E Venue Acceptance", files: ".forgejo/workflows/ci.yml, CODEOWNERS, shared/tests/verify_qemu_x86_64.sh", desc: "Enforce path-ownership CI checks (M4), test Hyper-V Gen2 VHDX + NIC/GPU firmware packages, and run 24-hour mixed x86_64 + ARM64 fleet soak to Cloudflare D1/KV + UDP :9750 netplay.", checks: ["M4 path-ownership lint enforced in Forgejo CI", "Hyper-V Gen2 VHDX boot + hardware NIC/GPU drivers verified", "24 h mixed x86_64/ARM64 soak passes with D1 telemetry parity & cross-cabinet netplay"] }
+];
+
+// ---- Renderers ----
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, m => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[m]));
+}
+
+// 1. Crates & Invariants
+const crateGrid = document.getElementById('crateGrid');
+crateGrid.innerHTML = CRATES.map(c => `
+  <div class="subcard">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+      <strong><code>${c.name}</code></strong>
+      <span class="pill ${c.cls}">${c.status}</span>
+    </div>
+    <div style="margin:6px 0 4px;font-weight:600;font-size:12.5px;">${c.summary}</div>
+    <div style="font-size:12px;color:var(--muted);">${c.detail}</div>
+  </div>`).join('');
+
+const invGrid = document.getElementById('invariantGrid');
+const invDrawer = document.getElementById('invariantDrawer');
+invGrid.innerHTML = INVARIANTS.map((v, i) => `
+  <div class="subcard clickable" onclick="showInv(${i})">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+      <strong>${v.name}</strong>
+      <span class="pill ${v.cls}">${v.badge}</span>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:6px;"><code>${v.loc}</code></div>
+    <div style="font-size:11.5px;color:var(--cyan);margin-top:6px;">Click to inspect mechanism &rarr;</div>
+  </div>`).join('');
+window.showInv = (i) => {
+  const v = INVARIANTS[i];
+  invDrawer.style.display = 'block';
+  invDrawer.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;"><strong>${v.name} (<code>${v.loc}</code>)</strong><span class="pill ${v.cls}">${v.badge}</span></div><p style="margin:8px 0 0;font-size:13px;">${v.body}</p>`;
+};
+showInv(2);
+
+function renderCommitTab(k) {
+  const list = COMMIT_TABS[k];
+  document.getElementById('commitTabBody').innerHTML = `<div class="subcard"><ul style="margin:0;padding-left:18px;font-size:13px;">${list.map(x => `<li style="margin-bottom:5px;">${escapeHtml(x)}</li>`).join('')}</ul></div>`;
+}
+document.querySelectorAll('#commitTabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#commitTabs button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  renderCommitTab(b.dataset.ctab);
+});
+renderCommitTab('committed');
+
+// 2. God-Nodes Chart
+function renderGodNodes(filter) {
+  const rows = GOD_NODES.filter(n => filter === 'all' || n.group === filter);
+  const colors = { boss: 'var(--emerald)', astro: 'var(--cyan)', shared: 'var(--amber)' };
+  document.getElementById('godChart').innerHTML = rows.map(r => {
+    const pct = Math.round((r.edges / 45) * 100);
+    return `<div class="bar-row" title="${r.loc}">
+      <div class="bar-meta"><span><code>${escapeHtml(r.name)}</code> <span style="color:var(--muted);font-size:11px;">(${r.loc})</span></span><strong>${r.edges}</strong></div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${colors[r.group]};"></div></div>
+    </div>`;
+  }).join('');
+}
+document.querySelectorAll('#godFilter button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#godFilter button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  renderGodNodes(b.dataset.g);
+});
+renderGodNodes('all');
+
+// 3. Latency Simulator & Accordion
+const simState = new Set();
+function renderSimToggles() {
+  document.getElementById('simToggles').innerHTML = LATENCY_ITEMS.map(item => `
+    <label class="sim-toggle">
+      <input type="checkbox" ${simState.has(item.rank) ? 'checked' : ''} onchange="toggleSim(${item.rank}, this.checked)" />
+      <div><strong>#${item.rank} ${escapeHtml(item.title)}</strong><div style="color:var(--muted);font-size:11.5px;">${escapeHtml(item.impact)}</div></div>
+    </label>`).join('');
+}
+window.toggleSim = (r, on) => { on ? simState.add(r) : simState.delete(r); updateGauges(); };
+function updateGauges() {
+  const has = r => simState.has(r);
+  const cmdMs = (has(1) ? 4 : 1000) + (has(7) ? 0 : 250);
+  const bootS = (8.5 - (has(1) ? 3.0 : 0) - (has(5) ? 2.5 : 0) - (has(3) ? 1.0 : 0)).toFixed(1);
+  const swapMs = (has(2) ? 180 : 2200) + (has(3) ? 120 : 1500);
+  const shellHz = has(6) ? 60 : 30;
+  const jitterMs = has(4) ? 0.6 : 10.0;
+  const discMs = has(9) ? 18 : 3600;
+  const gauges = [
+    { label: "Command + Pause Delivery (avg modeled)", val: `${cmdMs} ms`, pct: Math.min(100, (cmdMs / 1250) * 100), good: cmdMs <= 50, note: "2s HTTP poll avg (1,000 ms) + 250 ms GET_STATUS block" },
+    { label: "Cold Boot-to-Attract Sequence", val: `${bootS} s`, pct: Math.min(100, (bootS / 8.5) * 100), good: bootS <= 3.5, note: "3s boot delay + curl/sleep 1 loop + 4x systemctl + 1s attract sleep" },
+    { label: "Game Swap / Stage Barrier", val: `${swapMs} ms`, pct: Math.min(100, (swapMs / 3700) * 100), good: swapMs <= 400, note: "stage_all batch barrier + systemctl astro-frontend restart" },
+    { label: "Customer Shell Frame Pacing", val: `${shellHz} Hz`, pct: (shellHz / 60) * 100, good: shellHz === 60, note: "Removing sleep(16ms) after present_vsync() unlocks full 60 Hz", invertBar: true },
+    { label: "Input-to-Photon Polling Jitter", val: `${jitterMs} ms`, pct: (jitterMs / 10) * 100, good: jitterMs < 1, note: "udev fallback (~4–16 ms) vs 1000 Hz SpscRing Vulkan drain (<1 ms)" },
+    { label: "Fleet Rescue Discovery Scan", val: `${discMs} ms`, pct: (discMs / 3600) * 100, good: discMs < 50, note: "260-IP HTTP 450 ms scan vs UDP BEERCADE_NODE_ANNOUNCE recv" }
+  ];
+  document.getElementById('simGauges').innerHTML = gauges.map(g => {
+    const col = g.good ? 'var(--emerald)' : 'var(--amber)';
+    return `<div class="gauge-card">
+      <div class="bar-meta"><strong>${g.label}</strong><strong style="color:${col};">${g.val}</strong></div>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.max(4, g.pct)}%;background:${col};"></div></div>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">${g.note}</div>
+    </div>`;
+  }).join('');
+}
+document.getElementById('simBaseline').onclick = () => { simState.clear(); renderSimToggles(); updateGauges(); };
+document.getElementById('simTop3').onclick = () => { simState.clear(); [1,2,3].forEach(x=>simState.add(x)); renderSimToggles(); updateGauges(); };
+document.getElementById('simAll').onclick = () => { LATENCY_ITEMS.forEach(x=>simState.add(x.rank)); renderSimToggles(); updateGauges(); };
+[1,2,3,4,5,6,7,8,9,10].forEach(x => simState.add(x));
+renderSimToggles();
+updateGauges();
+
+document.getElementById('latencyAccordion').innerHTML = LATENCY_ITEMS.map((item, idx) => `
+  <div class="acc-item ${idx < 3 ? 'open' : ''}">
+    <div class="acc-hdr" onclick="this.parentElement.classList.toggle('open')">
+      <span><span class="pill p-info" style="margin-right:6px;">#${item.rank}</span> ${escapeHtml(item.title)} <span style="color:var(--muted);font-weight:400;">(${escapeHtml(item.area)})</span></span>
+      <span class="pill p-pass">${escapeHtml(item.impact)}</span>
+    </div>
+    <div class="acc-body">
+      <div><strong>Locations:</strong> <code>${escapeHtml(item.loc)}</code></div>
+      <div style="margin-top:6px;"><strong>Current Mechanism:</strong> ${escapeHtml(item.cur)}</div>
+      <div style="margin-top:6px;"><strong>Target Consolidation:</strong> ${escapeHtml(item.fix)}</div>
+    </div>
+  </div>`).join('');
+
+// 4. Storage SVG Donut & Hygiene Table
+const STORAGE_SEGMENTS = [
+  { label: ".ai-ignore/archive/ (Images + Graphify)", bytes: 29308364772, human: "27.30 GiB", color: "#22d3ee" },
+  { label: "out/ (11 OS Disk Images + SHA256)", bytes: 16646206917, human: "15.50 GiB", color: "#10b981" },
+  { label: "astro/rootfs/ (Stale Cross-Builds)", bytes: 676474121, human: "645.14 MiB", color: "#f59e0b" },
+  { label: "Preserved (u-boot*, *.mp4, Image, mods)", bytes: 135897000, human: "~129.6 MiB", color: "#a78bfa" }
+];
+(function renderDonut() {
+  const total = STORAGE_SEGMENTS.reduce((a, b) => a + b.bytes, 0);
+  const r = 74, c = 2 * Math.PI * r;
+  let offset = 0;
+  const circles = STORAGE_SEGMENTS.map(s => {
+    const len = (s.bytes / total) * c;
+    const el = `<circle cx="100" cy="100" r="${r}" fill="none" stroke="${s.color}" stroke-width="26" stroke-dasharray="${len.toFixed(2)} ${(c - len).toFixed(2)}" stroke-dashoffset="-${offset.toFixed(2)}" />`;
+    offset += len;
+    return el;
+  }).join('');
+  document.getElementById('storageDonutWrap').innerHTML = `
+    <svg width="210" height="210" viewBox="0 0 200 200" aria-label="Storage Cleanup Breakdown">
+      <g transform="rotate(-90 100 100)">${circles}</g>
+      <text x="100" y="95" text-anchor="middle" fill="currentColor" font-size="18" font-weight="800">43.43 GiB</text>
+      <text x="100" y="114" text-anchor="middle" fill="#93a4bf" font-size="11">Reclaimed</text>
+    </svg>`;
+  document.getElementById('storageLegend').innerHTML = STORAGE_SEGMENTS.map(s => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);gap:10px;">
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:3px;background:${s.color};margin-right:8px;"></span>${escapeHtml(s.label)}</span>
+      <span class="mono"><strong>${s.human}</strong> <span style="color:var(--muted);font-size:11px;">(${s.bytes.toLocaleString()} B)</span></span>
+    </div>`).join('') + `<div style="margin-top:10px;font-size:12px;color:var(--muted);"><strong>Strictly preserved:</strong> <code>ASTRO_rc1.mp4</code>, <code>Vid20261003015540[2].mp4</code>, <code>u-boot-rockchip.bin</code>, <code>.ai-ignore/archive/build/u-boot/*</code>, <code>universal-aarch64/boot/Image</code>, <code>astro/rootfs/lib/{modules,firmware}</code>, and <code>boss_static_net.sh</code>.</div>`;
+})();
+
+function renderHygiene(filter) {
+  const rows = HYGIENE_ROWS.filter(r => filter === 'ALL' || r.verdict === filter);
+  const pill = v => v === 'YES' ? 'p-yes' : (v === 'NEEDS_MERGE' ? 'p-merge' : 'p-muted');
+  document.getElementById('hygieneTbody').innerHTML = rows.map(r => `
+    <tr>
+      <td><strong>${escapeHtml(r.cat)}</strong></td>
+      <td><code>${escapeHtml(r.paths)}</code></td>
+      <td>${escapeHtml(r.proof)}</td>
+      <td><span class="pill ${pill(r.verdict)}">${r.verdict}</span></td>
+    </tr>`).join('');
+}
+document.querySelectorAll('#hygieneTabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#hygieneTabs button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  renderHygiene(b.dataset.hf);
+});
+renderHygiene('ALL');
+
+document.getElementById('copyGitRmBtn').onclick = () => {
+  const paths = HYGIENE_ROWS.flatMap(r => r.rm);
+  const cmd = `git rm -- ${paths.join(' ')}`;
+  navigator.clipboard?.writeText(cmd).then(() => toast('Copied git rm command for verified single-file YES items!')).catch(() => toast('Copy unsupported in this frame; inspect table paths.'));
+};
+
+// 5. Security Tabs
+function renderSecTab(tab) {
+  const el = document.getElementById('secTabBody');
+  if (tab === 'panics') {
+    el.innerHTML = `<div class="tabs" id="panicFilter">
+      <button class="btn active" data-pf="ALL">All</button>
+      <button class="btn" data-pf="REACHABLE_NETWORK">REACHABLE_NETWORK (4)</button>
+      <button class="btn" data-pf="REACHABLE_RUNTIME">REACHABLE_RUNTIME</button>
+      <button class="btn" data-pf="TEST_ONLY">TEST_ONLY</button>
+    </div><div class="tbl-wrap"><table><thead><tr><th>File:Line</th><th>Expression</th><th>Reachability</th><th>Trigger Vector</th><th>Safe Fix</th></tr></thead><tbody id="panicBody"></tbody></table></div>`;
+    const drawP = f => {
+      const rows = PANICS.filter(p => f === 'ALL' || p.reach === f);
+      document.getElementById('panicBody').innerHTML = rows.map(p => {
+        const cls = p.reach === 'REACHABLE_NETWORK' ? 'p-net' : (p.reach === 'TEST_ONLY' ? 'p-test' : 'p-warn');
+        return `<tr><td><code>${escapeHtml(p.loc)}</code></td><td><code>${escapeHtml(p.expr)}</code></td><td><span class="pill ${cls}">${p.reach}</span></td><td>${escapeHtml(p.vec)}</td><td><code>${escapeHtml(p.fix)}</code></td></tr>`;
+      }).join('');
+    };
+    drawP('ALL');
+    el.querySelectorAll('#panicFilter button').forEach(b => b.onclick = () => {
+      el.querySelectorAll('#panicFilter button').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      drawP(b.dataset.pf);
+    });
+  } else if (tab === 'secrets') {
+    el.innerHTML = `<div class="tbl-wrap"><table><thead><tr><th>File:Line</th><th>Type</th><th>Observed Exposure</th><th>Risk</th></tr></thead><tbody>${SECRETS.map(s => `<tr><td><code>${escapeHtml(s.loc)}</code></td><td><strong>${escapeHtml(s.kind)}</strong></td><td>${escapeHtml(s.val)}</td><td><span class="pill ${s.risk === 'HIGH' ? 'p-high' : 'p-med'}">${s.risk}</span></td></tr>`).join('')}</tbody></table></div>`;
+  } else if (tab === 'ab') {
+    el.innerHTML = `<div class="grid-3">
+      <div class="subcard"><strong>x86_64 (systemd-boot)</strong><p style="font-size:12.5px;color:var(--muted);"><code>ota.rs:152-172</code> &amp; <code>beercade-hal</code> run <code>bootctl set-default</code> and reboot immediately without updating ESP kernel/initramfs, without <code>+3</code> boot-counting entry suffixes, and without <code>systemd-bless-boot</code>.</p><span class="pill p-gap">NO ROLLBACK</span></div>
+      <div class="subcard"><strong>Raspberry Pi 4 / 5</strong><p style="font-size:12.5px;color:var(--muted);"><code>universal-aarch64/boot/cmdline.txt</code> hardcodes <code>PARTLABEL=ROOT_A</code> with no <code>autoboot.txt</code> / <code>tryboot</code> flow. <code>beercade-hal</code> also hardcodes <code>/dev/sda2</code>/<code>/dev/sda3</code>. <strong>Slot B is unbootable.</strong></p><span class="pill p-risk">SLOT B UNBOOTABLE</span></div>
+      <div class="subcard"><strong>Radxa Rock 5C (RK3588)</strong><p style="font-size:12.5px;color:var(--muted);"><code>extlinux.conf</code> defines only <code>ROOT_A</code> with no U-Boot <code>bootcount</code> / <code>altbootcmd</code> fallback, and <code>beercade-hal</code> tries writing an unmounted <code>/boot/extlinux/extlinux.conf</code> inside squashfs.</p><span class="pill p-risk">SLOT B UNBOOTABLE</span></div>
+    </div>`;
+  } else {
+    el.innerHTML = `<div class="tbl-wrap"><table><thead><tr><th>Check Area</th><th>File:Line</th><th>Status</th><th>Detail</th></tr></thead><tbody>${PAGE16K.map(r => {
+      const cls = r.status === 'SAFE' ? 'p-safe' : (r.status === 'RISK' ? 'p-risk' : 'p-missing');
+      return `<tr><td><strong>${escapeHtml(r.area)}</strong></td><td><code>${escapeHtml(r.loc)}</code></td><td><span class="pill ${cls}">${r.status}</span></td><td>${escapeHtml(r.detail)}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  }
+}
+document.querySelectorAll('#secTabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#secTabs button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  renderSecTab(b.dataset.stab);
+});
+renderSecTab('panics');
+
+// 6. 7-Phase GA Roadmap + localStorage
+const LS_KEY = 'beercade_rc1_ga_checklist_v1';
+let checkedMap = {};
+try { checkedMap = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch {}
+let activePhase = 1;
+
+function updateGaProgress() {
+  const total = ROADMAP.reduce((a, p) => a + p.checks.length, 0);
+  const done = Object.values(checkedMap).filter(Boolean).length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  document.getElementById('gaBadge').textContent = `${done} / ${total} Exit Criteria Checked`;
+  document.getElementById('gaPct').textContent = `${pct}%`;
+  document.getElementById('gaBar').style.width = `${pct}%`;
+  document.getElementById('railProgress').textContent = `${pct}%`;
+}
+
+function renderRoadmap() {
+  document.getElementById('phaseStrip').innerHTML = ROADMAP.map(p => {
+    const pDone = p.checks.filter((_, i) => checkedMap[`${p.id}_${i}`]).length;
+    return `<button class="phase-pill ${p.id === activePhase ? 'active' : ''}" onclick="selectPhase(${p.id})">
+      <div style="font-size:11px;color:var(--cyan);font-weight:800;">PHASE 0${p.id} · ${pDone}/${p.checks.length}</div>
+      <div style="font-weight:700;font-size:12.5px;margin-top:3px;">${escapeHtml(p.title)}</div>
+    </button>`;
+  }).join('');
+  const ph = ROADMAP.find(x => x.id === activePhase);
+  document.getElementById('phaseDetail').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+      <h3 style="margin:0;">Phase ${ph.id}: ${escapeHtml(ph.title)}</h3>
+      <code>${escapeHtml(ph.files)}</code>
+    </div>
+    <p style="margin:8px 0 12px;color:var(--muted);">${escapeHtml(ph.desc)}</p>
+    <strong style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);">Exit Criteria (Interactive Verification Checklist)</strong>
+    <div style="margin-top:8px;">${ph.checks.map((c, i) => {
+      const k = `${ph.id}_${i}`;
+      const isDone = !!checkedMap[k];
+      return `<label class="chk-row ${isDone ? 'done' : ''}"><input type="checkbox" ${isDone ? 'checked' : ''} onchange="toggleCheck('${k}', this.checked)" /><span>${escapeHtml(c)}</span></label>`;
+    }).join('')}</div>`;
+  updateGaProgress();
+}
+window.selectPhase = id => { activePhase = id; renderRoadmap(); };
+window.toggleCheck = (k, on) => { checkedMap[k] = on; try { localStorage.setItem(LS_KEY, JSON.stringify(checkedMap)); } catch {} renderRoadmap(); };
+document.getElementById('resetRoadmapBtn').onclick = () => { checkedMap = {}; try { localStorage.removeItem(LS_KEY); } catch {} renderRoadmap(); toast('Checklist reset.'); };
+renderRoadmap();
+
+// 7. Gallery
+document.getElementById('galleryGrid').innerHTML = IMAGES.map((im, i) => `
+  <div class="fig-card" style="margin:0;">
+    <div class="fig-wrap" onclick="openLightbox(${i})">
+      <img src="${im.src}" alt="${escapeHtml(im.title)}" style="max-height:240px;" />
+      <span class="fig-zoom-hint">Zoom</span>
+    </div>
+    <div class="fig-cap"><strong>${escapeHtml(im.title)}</strong><div style="margin-top:3px;">${escapeHtml(im.cap)}</div></div>
+  </div>`).join('');
+
+// Lightbox
+let lbIdx = 0;
+const lb = document.getElementById('lightbox');
+const lbStage = document.getElementById('lbStage');
+window.openLightbox = i => {
+  lbIdx = (i + IMAGES.length) % IMAGES.length;
+  document.getElementById('lbImg').src = IMAGES[lbIdx].src;
+  document.getElementById('lbCap').textContent = `${IMAGES[lbIdx].title} — ${IMAGES[lbIdx].cap}`;
+  lbStage.classList.remove('zoomed');
+  lb.classList.add('open');
+};
+document.getElementById('lbClose').onclick = () => lb.classList.remove('open');
+document.getElementById('lbPrev').onclick = () => openLightbox(lbIdx - 1);
+document.getElementById('lbNext').onclick = () => openLightbox(lbIdx + 1);
+document.getElementById('lbZoom').onclick = () => lbStage.classList.toggle('zoomed');
+lb.onclick = e => { if (e.target === lb) lb.classList.remove('open'); };
+
+// Theme Toggle & Print
+const themeBtn = document.getElementById('themeToggle');
+themeBtn.onclick = () => {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const nxt = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', nxt);
+  themeBtn.textContent = `Theme: ${nxt === 'dark' ? 'Dark' : 'Light'}`;
+};
+document.getElementById('printBtn').onclick = () => window.print();
+
+// Global Search + Scroll Spy
+const searchInput = document.getElementById('globalSearch');
+const searchCount = document.getElementById('searchCount');
+function clearHighlights() {
+  document.querySelectorAll('mark.hl').forEach(m => m.replaceWith(document.createTextNode(m.textContent)));
+  document.querySelectorAll('.searchable-section').forEach(s => { s.style.opacity = '1'; s.normalize(); });
+  searchCount.textContent = '';
+}
+function runSearch(q) {
+  clearHighlights();
+  q = q.trim();
+  if (!q) return;
+  const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  let hits = 0;
+  document.querySelectorAll('.searchable-section').forEach(sec => {
+    let secHits = 0;
+    const walk = document.createTreeWalker(sec, NodeFilter.SHOW_TEXT, null);
+    const nodes = [];
+    while (walk.nextNode()) {
+      const p = walk.currentNode.parentNode;
+      if (p && !['SCRIPT','STYLE'].includes(p.tagName) && rx.test(walk.currentNode.nodeValue)) nodes.push(walk.currentNode);
+      rx.lastIndex = 0;
+    }
+    nodes.forEach(n => {
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      n.nodeValue.replace(rx, (m, off) => {
+        if (off > last) frag.appendChild(document.createTextNode(n.nodeValue.slice(last, off)));
+        const mk = document.createElement('mark'); mk.className = 'hl'; mk.textContent = m;
+        frag.appendChild(mk);
+        last = off + m.length;
+        secHits++; hits++;
+      });
+      if (last < n.nodeValue.length) frag.appendChild(document.createTextNode(n.nodeValue.slice(last)));
+      n.replaceWith(frag);
+    });
+    sec.style.opacity = secHits > 0 ? '1' : '0.45';
+  });
+  searchCount.textContent = `${hits} hits`;
+}
+searchInput.addEventListener('input', () => runSearch(searchInput.value));
+document.getElementById('clearSearch').onclick = () => { searchInput.value = ''; clearHighlights(); };
+document.addEventListener('keydown', e => {
+  if ((e.key === '/' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k')) && document.activeElement !== searchInput) {
+    e.preventDefault(); searchInput.focus();
+  } else if (e.key === 'Escape') {
+    lb.classList.remove('open');
+  }
+});
+
+const links = Array.from(document.querySelectorAll('.nav-link'));
+const obs = new IntersectionObserver(entries => {
+  entries.forEach(en => {
+    if (en.isIntersecting) {
+      links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + en.target.id));
+    }
+  });
+}, { rootMargin: '-20% 0px -65% 0px' });
+document.querySelectorAll('main > section').forEach(s => obs.observe(s));
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2800);
+}
+</script>
+</body>
+</html>
