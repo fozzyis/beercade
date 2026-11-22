@@ -1,6 +1,6 @@
 # A.S.T.R.O. Customer Shell & B.O.S.S.-Driven Sessions — Plan
 
-Status: approved direction, 2026-10-29. Owner split: A.S.T.R.O. + `shared` (Claude), B.O.S.S. (Antigravity).
+Status: Phase 1 & Phase 2 implemented (GA HEAD); out-of-game visual polish & hardware soak open. Owner split: A.S.T.R.O. + `shared` (Claude), B.O.S.S. (Antigravity).
 
 ## Goals
 
@@ -32,9 +32,12 @@ Status: approved direction, 2026-10-29. Owner split: A.S.T.R.O. + `shared` (Clau
 - **UpdateSession** may arrive in PICKER, IN_GAME or EXPIRED. New games are staged in the background; removed games are deleted once not running.
 - On boot, and on any daemon start, `/data/beercade/session/` and `/data/beercade/attract/` are wiped before anything else (crash/power-loss safety).
 
-## Protocol contract (`shared/crates/beercade-shared/src/models.rs`)
+## Protocol contract (`shared/crates/beercade-shared/src/models.rs` → `shared/proto/telemetry.ts`)
 
-This section is the agreed interface between both sides. Changes need both owners.
+`shared/crates/beercade-shared/src/models.rs` is the canonical Rust definition,
+and `cargo run -p beercade-shared --bin gen_ts_proto -- --check` (enforced in
+CI) guarantees exact parity with `shared/proto/telemetry.ts`. Changes need both
+owners.
 
 ```rust
 pub struct GameRef {
@@ -86,52 +89,43 @@ Game file delivery (B.O.S.S. side, node-authenticated):
 - Supports `Range` (resume after a dropped connection). Streams; no full-file buffering.
 - Logged (node, game, session, bytes) for licence auditing.
 
-## Already built: in-game overlay (commit e388456)
+## Already built: in-game overlay & `astro_rt` pause bridge
 
 Designs: design canvas https://claude.ai/artifact/J4pSrtxcoEm2MNrAFD3ey3, `project/<theme>/Astro.dc.html` (taproom/retro, vector, bigsky, pinball; classic = current). They cover three in-game states only: **HUD**, **pause menu**, **time's up / CONTINUE?**.
 
-Implemented in `astro/daemon/src/overlay.rs` + `input.rs`, drawn through RetroArch's OSD over its UDP command port (55355); venue theme from `GET /api/v1/ui/theme` sets the OSD colour; the launcher merges the overlay appendconfig with the GL fallback.
+Implemented in `astro/daemon/src/overlay.rs` + `input.rs` + `astro_rt` (`0002-astro-rt-vulkan-udev-input.patch`), drawn through RetroArch's OSD over its UDP command port (55355); venue theme from `GET /api/v1/ui/theme` sets the OSD colour; `astro_rt` runs 1000 Hz evdev polling and signals pause/menu requests over `/run/astro/menu.sock`.
 - HUD lines at time milestones; toasts for credits/orders/scores.
-- Pause menu (TAB, gamepad guide, or START+SELECT held), evdev grabbed while open so ESC/hotkeys never reach RetroArch: RESUME, ADD CREDITS, ORDER A DRINK, HIGH SCORES, NETPLAY, CALL STAFF, END SESSION (confirm twice).
-- Time's up: game paused, `CONTINUE? N` countdown (`CONTINUE_SECS = 10`), more time resumes, otherwise the game closes.
-
-Limits to know: RetroArch's OSD is **one line of text in one colour**. The artboards' panels, glow, countdown ring and price buttons can't be drawn that way; the overlay is a faithful text version. The rc1 test image (built 2026-10-28 21:55) predates this commit, which is why no HUD showed.
-
-Changes this plan makes to the overlay:
-- Pause menu gains **QUIT GAME** (back to the game picker, session keeps running) above END SESSION; END SESSION keeps its meaning (ends the session for everyone, wipe files).
-- Time's up: the in-game `CONTINUE?` window stays short (10 s) and just pauses the game; when it closes the shell takes over and shows the full top-up screen for the rest of `topup_grace_secs` from B.O.S.S. Files are wiped only when that grace ends.
-- The menu combo is the cabinet's only way out of a game. Escape and RetroArch's menu are unbound in the base config as well (belt and braces for when the daemon isn't running).
+- Pause menu (TAB, gamepad guide, or START+SELECT held), input isolated while open so ESC/hotkeys never reach RetroArch: RESUME, QUIT GAME (returns to `astro-shell` picker), ADD CREDITS, ORDER A DRINK, HIGH SCORES, NETPLAY, CALL STAFF, END SESSION (confirm twice).
+- Time's up: game paused, `CONTINUE? N` countdown (`CONTINUE_SECS = 10`), more time resumes, otherwise the game closes and `astro-shell` presents the full-screen top-up window for `topup_grace_secs`.
 
 ## Still needs designs
 
 The artboards don't cover the out-of-game screens the shell draws: **attract call-to-action, staging ("getting your games ready"), game picker, change-my-games (code + QR), full-screen time's up/top-up, session ended**. Ask the design agent for these four themes, matching the existing in-game artboards. The shell can be built against wireframes meanwhile.
 
-## A.S.T.R.O. work (Claude)
+## A.S.T.R.O. work — Implemented (Phase 1 & Phase 2, `bb34ebb`..`5978d03`)
 
-Phase 1 — shell, attract, picker
-1. `shared`: contract above + serde round-trip tests; keep the old `EndSession` JSON accepted for one release.
-2. Daemon `session` module: state machine above, countdown owned by the daemon, persisted to `/data/beercade/session/state.json` so a reboot mid-session resumes the right time (files are re-fetched; they were wiped).
-3. Daemon `staging` module: download to `*.part`, verify SHA-256, rename; concurrency 2; wipe on boot; delete with unlink + `fstrim` hint. Files never leave `/data/beercade/{session,attract}/`.
-4. **`astro-shell`** (new crate, Rust + SDL2 on KMS): attract screen, "See the bar to play" call to action, game picker (big tiles, joystick/buttons only), time-left bar, "Change my games" screen with session code + QR, "Time's up" + top-up screen. Talks to the daemon over a Unix socket (JSON lines). Releases DRM before RetroArch starts, re-acquires after.
-   - Visual design: the four venue themes from the design canvas (colours, fonts, glow treatment as in the in-game artboards); out-of-game screens per "Still needs designs".
-5. RetroArch lockdown (x86 cfg): menu toggle unbound, Escape/quit key unbound, `config_save_on_exit = false`, `pause_nonactive = false`. Leaving a game goes only through the existing pause menu (QUIT GAME / END SESSION). Time warnings already come from the overlay HUD.
-6. Replace ES-DE: `astro-frontend.service` runs `astro-shell`; drop ES-DE from `NATIVE_BUILDS` and the image; remove the seeded attract ROMs from the DATA payload (they now come from B.O.S.S.).
-7. Tests: state-machine unit tests (expiry, grace, top-up mid-game, update while staging), staging tests against a fake HTTP server (bad hash, resume, 403), shell input tests headless.
+Phase 1 — shell, attract, picker (**Implemented**)
+1. `shared`: contract above + serde round-trip tests + `gen_ts_proto` TypeScript codegen (`shared/proto/telemetry.ts`).
+2. Daemon `session` module (`astro/daemon/src/session.rs`): state machine above, countdown owned by the daemon, persisted atomically to `/data/beercade/session/state.json`.
+3. Daemon `staging` module (`astro/daemon/src/staging.rs`): streaming `*.part` download, SHA-256 verification, LRU caching, wipe on boot/end. Files stay under `/data/beercade/{session,attract}/`.
+4. **`astro-shell`** (`astro/shell`): resident Rust + SDL2 KMS customer screen driven via `/run/astro/shell.sock` (`shell_ipc.rs`), using `SIGSTOP`/`SIGCONT` DRM handoff so RetroArch gets exclusive KMS control without tearing down the shell.
+5. RetroArch lockdown (`astro/rootfs/root/.config/retroarch/retroarch.cfg` + `astro/platform/x86_64/rootfs/...`): menu toggle unbound, Escape/quit unbound, `config_save_on_exit = false`, `pause_nonactive = false`.
+6. Replace ES-DE: `astro-frontend.service` runs `astro-shell`; ES-DE removed from `NATIVE_BUILDS` and x86 images. *(Note: bundled dev/attract ROM files in `astro/roms/*.zip` remain in the repo for local testing and must be audited/cleaned before commercial deployment.)*
+7. Tests: state-machine, streaming staging, and headless shell tests implemented in `astro-daemon` / `astro-shell`.
 
-Phase 2 — change games & upsell (needs B.O.S.S. phase 2)
-8. "Change my games" emits `ChangeRequested`; shell shows the code/QR and keeps the picker usable until B.O.S.S. responds.
-9. `UpdateSession` handling: stage new games in the background, swap lists atomically, never delete the running game.
-10. Top-up screen during `EXPIRED` mirrors the offer B.O.S.S. shows.
+Phase 2 — change games & upsell (**Implemented**)
+8. "Change my games" emits `ChangeRequested`; shell shows `BRC-XXXX` session code + QR and stays responsive until `UpdateSession` arrives.
+9. `UpdateSession` handling: background staging of new games and atomic list swaps without killing the running game.
+10. Top-up screen during `EXPIRED` mirrors the B.O.S.S. grace offer (`topup_grace_secs`).
 
-## B.O.S.S. work (Antigravity) — summary
+## B.O.S.S. work — Implemented (`66b29f7`, `5978d03`)
 
-See `docs/antigravity-boss-session-prompt.md` for the full brief.
-- Game catalogue (files + metadata + system), with SHA-256 computed on import.
-- Game selection during purchase; session code issued per session.
-- Session code look-up to edit a live session's games; upsell more time / extra slots there.
-- Attract playlists: 2–3 random games from different systems per entry into attract; avoid repeating recent picks.
-- Node-authenticated file endpoint and events endpoint above.
-- Top-up offer during the grace window; `UpdateSession{add_secs}` on purchase, `EndSession` otherwise.
+See `docs/antigravity-boss-session-prompt.md` for the original brief; implemented in `boss/src/`:
+- Game catalogue (`boss/src/catalogue.rs`): file scan + metadata + SHA-256 computation + default fallback entries.
+- Session issuance & editing (`boss/src/plugins.rs`, `boss/src/routes.rs`, `website/src/routes/api/webhooks/stripe/+server.ts`): `BRC-XXXX` codes, `GET /api/v1/sessions/:code`, `POST /api/v1/sessions/:code/update`, `POST /api/v1/sessions/:code/end`.
+- Attract playlists: multi-system random picks avoiding recent repeats (`catalogue.rs`).
+- Node-authenticated `Range`-capable `GET /api/v1/cabinet/:node_id/games/:game_id/file` and `POST /api/v1/cabinet/:node_id/events`.
+- Multiplexed command delivery over `WS_TELEMETRY` (`ws_telemetry.rs`) alongside HTTP fallback polling.
 
 ## Open items
 

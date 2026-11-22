@@ -3,7 +3,7 @@
 # Domains: boss | astro | website | shared
 # ==============================================================================
 
-.PHONY: all check check-cargo check-types check-website check-kiosk gen-types test build-boss build-astro build-website clean image-x86 verify-x86 image-boss-x86 verify-boss-x86 image-boss-rpi
+.PHONY: all check check-cargo check-types check-website check-kiosk gen-types test build-boss build-astro build-website clean image-x86 verify-x86 image-boss-x86 verify-boss-x86 image-boss-rpi verify-hyperv-x86 verify-hyperv-boss-x86 lint-governance soak-m5-smoke
 
 all: check test
 
@@ -76,3 +76,20 @@ image-boss-rpi:
 verify-boss-x86:
 	@echo "=== Verifying x86_64 B.O.S.S. Image (QEMU + OVMF, TCG, two boots) ==="
 	bash shared/tests/verify_qemu_x86_64.sh boss
+
+verify-hyperv-x86:
+	@echo "=== Verifying x86_64 A.S.T.R.O. VHDX (Hyper-V Gen2, Secure Boot Off) ==="
+	pwsh -NoProfile -ExecutionPolicy Bypass -File shared/tests/verify_hyperv_x86_64.ps1 -Payload astro
+
+verify-hyperv-boss-x86:
+	@echo "=== Verifying x86_64 B.O.S.S. VHDX (Hyper-V Gen2, Secure Boot Off) ==="
+	pwsh -NoProfile -ExecutionPolicy Bypass -File shared/tests/verify_hyperv_x86_64.ps1 -Payload boss
+
+lint-governance:
+	@echo "=== Running M4 Governance & x86_64 Payload/VHDX Static Checks ==="
+	python3 scripts/lint_governance.py
+	python3 shared/tests/test_x86_payload_and_vhdx.py
+
+soak-m5-smoke:
+	@echo "=== Running M5 Mixed-Arch Venue Smoke Soak ==="
+	python3 shared/tests/m5_venue_soak.py --mode smoke --duration-secs 15

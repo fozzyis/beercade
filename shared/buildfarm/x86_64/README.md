@@ -68,5 +68,7 @@ platform files in `boss/platform/common/` (shared with the Raspberry Pi image in
 `../aarch64`) plus the ESP in `boss/platform/x86_64/esp`; reuses the astro initcpio hook and
 mkinitcpio config, which are image-agnostic).
 
-Verification: `bash shared/tests/verify_qemu_x86_64.sh <payload>` (`make
-verify-x86`, `make verify-boss-x86`).
+Verification:
+- QEMU + OVMF (`.raw` or `.vhdx`): `bash shared/tests/verify_qemu_x86_64.sh <payload> [image]` (`make verify-x86`, `make verify-boss-x86`).
+- Windows Hyper-V Gen2 (`.vhdx`, Secure Boot off, `hv_kvp_daemon`): `powershell -File shared/tests/verify_hyperv_x86_64.ps1 -Payload <astro|boss>` (`make verify-hyperv-x86`, `make verify-hyperv-boss-x86`; supports `-DryRun`).
+- Firmware & drivers: both `astro.conf` and `boss.conf` install split `linux-firmware-{amdgpu,intel,radeon,realtek,mediatek,atheros,broadcom,marvell,other}`, `mesa`, `vulkan-{radeon,intel,icd-loader}`, and `hyperv` (`hv_kvp_daemon.service`).

@@ -17,7 +17,7 @@ Cargo workspace root: `Cargo.toml` (`resolver = "2"`, release profile: `lto = "t
 | **`astro-daemon`** | `astro/daemon` | Cabinet node supervisor: KMS game launcher, rollback netplay, mandatory `X-OTA-SHA256` staging verification & cleanup, atomic credit persistence (`credits.json.tmp` -> `sync_all()` -> rename + `.bak` tiered recovery). |
 | **`astro-shell` / `astro-tune` / `astro/rt`** | `astro/shell`, `astro/tune`, `astro/rt` | Cabinet shell utilities, low-latency tuning CLI, and real-time C/C++ helpers (`astro/rt/CMakeLists.txt`). |
 | **`boss-server`** | `boss` | Central Operations & Supervisory System (Axum REST/WS/SSE): operator PIN auth with 5-failure/60s lockout (`PinAttemptTracker`), command queue & ACK ingestion, heartbeat/thermal alerting, OTA distribution. |
-| **Operator & Kiosk UIs** | `boss/dashboard`, `boss/kiosk_ui`, `website` | Frontend TypeScript/SvelteKit/Vite interfaces and plugin SDK (`boss/plugin_sdk`). |
+| **Operator & Kiosk UIs** | `boss/kiosk_ui`, `website`, `boss/plugin_sdk` | Frontend TypeScript/SvelteKit/Vite interfaces and plugin SDK. |
 
 ## 3. Build, Test & Hygiene Directives
 - **Never Traverse or Index Ignored Artifacts:** Skip `.ai-ignore/`, `target/`, `out/`, `astro/roms/`, `astro/rt/build/`, `node_modules/`, `.svelte-kit/`, `*.img`, `*.squashfs`, `*.zst`, and `*.mp4`.

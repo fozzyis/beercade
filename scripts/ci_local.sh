@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local Linux/WSL2 CI runner mirroring .forgejo/workflows/ci.yml.
+# Local Linux/WSL2 CI runner mirroring .github/workflows/ci.yml.
 # Usage: bash scripts/ci_local.sh [--with-frontends]
 set -euo pipefail
 
@@ -27,6 +27,10 @@ export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 RT_BUILD_DIR="${RT_BUILD_DIR:-/tmp/beercade-astro-rt-build}"
 mkdir -p "$CARGO_TARGET_DIR"
 
+echo "==== 0. M4 governance, crate-boundary & x86_64 payload/VHDX lint ===="
+python3 scripts/lint_governance.py
+python3 shared/tests/test_x86_payload_and_vhdx.py
+
 echo "==== 1. Cargo check (workspace, --locked, -D warnings) ===="
 RUSTFLAGS="-D warnings" cargo check --workspace --locked --message-format=short
 
@@ -51,7 +55,7 @@ cmake --build "$RT_BUILD_DIR"
 ctest --test-dir "$RT_BUILD_DIR" --output-on-failure
 
 echo "==== 5. Buildfarm shell syntax check ===="
-bash -n shared/buildfarm/aarch64/build_image.sh shared/buildfarm/x86_64/build_image.sh scripts/ci_local.sh
+bash -n shared/buildfarm/aarch64/build_image.sh shared/buildfarm/x86_64/build_image.sh shared/tests/verify_qemu_x86_64.sh scripts/ci_local.sh
 
 if ((WITH_FRONTENDS)); then
   echo "==== 6. Frontend type checks ===="

@@ -34,12 +34,12 @@ The website (Cloudflare Pages) is out of scope here; CI only type-checks it.
 | # | Milestone | Status | Model |
 |---|---|---|---|
 | M0 | Hardware abstraction (`beercade-hal`) | Done | Opus |
-| M1 | CI: build + test on every push | Done (x86_64); arm64 parked | Sonnet |
+| M1 | CI: build + test on every push | Done (`x86_64` & `arm64`) | Sonnet |
 | M2 | A.S.T.R.O. x86_64 bootable image | Done | Opus + Sonnet |
 | M2b | B.O.S.S. x86_64 bootable image | Done | Opus |
-| M3 | A.S.T.R.O. PC runtime: GPUs, emulators, latency | Built; hardware gate open | Opus + Sonnet |
-| M4 | Path ownership rules and lint | Any time | Haiku |
-| M5 | End-to-end acceptance: A.S.T.R.O. → B.O.S.S. → cloud ingest | Last | Sonnet |
+| M3 | A.S.T.R.O. PC runtime: GPUs, emulators, latency | Built (`astro-shell` + `astro_rt` wired); real-hardware frame-time gate open | Opus + Sonnet |
+| M4 | Path ownership rules and lint | Done (`CODEOWNERS` + CI `governance` job) | Haiku |
+| M5 | End-to-end acceptance: A.S.T.R.O. → B.O.S.S. → cloud ingest | Harness & runbook ready; 24h mixed-arch venue hardware soak pending | Sonnet |
 
 ### M0 — Hardware abstraction (done)
 `shared/crates/beercade-hal`: platform detection (RK3588, Pi 5, Pi 4, generic
@@ -47,24 +47,22 @@ ARM, x86_64), thermals, A/B slot devices, active-slot detection, bootloader
 commit, realtime CPU selection. The daemon's OTA, telemetry and thermal
 watchdog go through it. ARM behaviour unchanged.
 
-Open item: a failed thermal read is reported as `null` in telemetry. Making
-`cpu_temp_c` / `gpu_temp_c` optional in `beercade-shared` (and handling it on
-the website dashboard) is a contract change awaiting a decision.
+Resolved: failed thermal reads are modeled as `Option<f32>` (`cpu_temp_c` /
+`gpu_temp_c` in `shared/crates/beercade-shared/src/models.rs`, propagated via
+`typeshare` to `shared/proto/telemetry.ts`) with NaN guards in `astro-daemon`.
 
-### M1 — CI (done for x86_64)
-`.forgejo/workflows/ci.yml`. Runners: `laptop-x86_64` (Docker Desktop,
-label `x86_64`) and the RK3588 runner (label `arm64`). Rust check, test and
-release build plus website and kiosk type checks (Node 22).
+### M1 — CI (done: `x86_64` & `arm64`)
+`.github/workflows/ci.yml`. Runners: GitHub-hosted `ubuntu-24.04` (`x86_64`)
+and `ubuntu-24.04-arm` (`arm64`) on the public GitHub repo (migrated from Forgejo). Runs `RUSTFLAGS=-D warnings`
+`cargo check --workspace --locked`, `cargo test --workspace --locked`,
+`gen_ts_proto --check`, `astro/rt` CMake + Ninja + CTest, release builds,
+Node 22 frontend type checks (`website`, `boss/kiosk_ui`), and the M4
+`governance` job (`scripts/lint_governance.py` + payload/VHDX static checks).
 
-Open item: the arm64 job failed on its first run and is parked; logs not yet
-reviewed. The x86 job showed the likely cause intermittently: after a hard
-resync to host frame G, a late remote input for a pre-freeze frame started a
-rollback that replayed frames the guest never simulated and panicked
-(`netplay.rs`, "slot within ring"). Fixed 2026-10-24: inputs below the resync
-frame are ignored, and a rollback with a gap in its replay range escalates to
-a hard resync instead of panicking; two deterministic regression tests. The
-convergence test also gives cabinet A a 20 ms head start so it always has
-predicted frames to roll back. Re-enable arm64 to confirm.
+The earlier `arm64` netplay rollback panic (`netplay.rs`, "slot within ring")
+was fixed in `1f14198` / `f7617b3` (inputs below the resync frame ignored, gaps
+escalate to hard resync, deterministic regression tests added) and the `arm64`
+CI matrix job was re-enabled in `c4958e7`.
 
 ### M2 — A.S.T.R.O. x86_64 image (done)
 `make image-x86` → `out/beercade-astro-x86_64.raw` (4.75 GiB raw; squashfs
@@ -86,13 +84,13 @@ root ~283 MiB). `make verify-x86` boots it under QEMU/OVMF (TCG) and passes.
   and checks `systemctl is-active multi-user.target astro-daemon.service`.
 
 Notes for later milestones:
-- Root's password is locked; tty1 autologins as root (from `astro/rootfs`).
-  systemd accepts credentials from SMBIOS, so anything controlling the
-  firmware tables can inject units — fine for a kiosk, revisit for hardening.
+- Root's password is locked; `astro-frontend.service` claims `tty1` (conflicting
+  with `getty@tty1.service`) to run `astro-shell` on KMS. systemd accepts
+  credentials from SMBIOS, so anything controlling firmware tables can inject
+  units — fine for a kiosk test VM, revisit for production hardening.
 - Not CI-gated yet: the build needs `--privileged` and ~5 GB, and TCG boot
   takes ~4–5 min. Candidate for a manual/nightly job on the laptop runner.
-- `boss-static-net.service` from `astro/rootfs` is copied but not enabled.
-- Image is 4.75 GiB raw (sparse partitions); M2b added `.zst` and `.vhdx` outputs.
+- Image outputs: `.raw`, `.raw.zst`, `.vhdx`, and `.raw.sha256`.
 
 ### M2b — B.O.S.S. x86_64 image (done)
 `make image-boss-x86` → `out/beercade-boss-x86_64.raw` (4.75 GiB raw, squashfs
@@ -119,89 +117,95 @@ root ~590 MiB, mostly Chromium), `.raw.zst` (~1.24 GiB), `.vhdx` (~1.4 GiB),
   set-default beercade-slot-b.conf` (checked via the `LoaderEntryDefault` EFI
   var), reboots. Boot 2: same checks, `root=PARTLABEL=ROOT_B`, nonce present.
   OVMF vars and the snapshot disk live for the whole QEMU process.
-- Hyper-V: the initramfs includes `hv_vmbus hv_storvsc hyperv_keyboard`.
-  Hyper-V Generation 2 VMs need Secure Boot off (images are unsigned):
+- Hyper-V: the initramfs includes `hv_vmbus hv_storvsc hv_netvsc hyperv_keyboard`,
+  and both x86 payloads include `hyperv` (`hv_kvp_daemon.service`).
+  Hyper-V Generation 2 VMs require Secure Boot off (the images are unsigned):
   `New-VM -Generation 2 -VHDPath out\<image>.vhdx`, `Set-VMFirmware
-  -EnableSecureBoot Off`. Not exercised by the QEMU gates.
+  -EnableSecureBoot Off`. Automated verification lives in
+  `shared/tests/verify_hyperv_x86_64.ps1` (`make verify-hyperv-x86` /
+  `make verify-hyperv-boss-x86`), and `shared/tests/verify_qemu_x86_64.sh`
+  also accepts `.vhdx` images directly.
 
 Notes for later milestones:
-- M5: B.O.S.S. answers on :8080 at 192.168.100.10; `boss.lan` needs DNS on the
-  venue router (avahi publishes `boss.local`). The x86 A.S.T.R.O. image
-  hard-codes 192.168.100.2, so two x86 nodes on one LAN clash.
-- `beercade-hal` slot switching works with this layout; nothing marks a slot
-  good/bad yet (no boot counting).
-- The kiosk runs unaccelerated in QEMU; real GPUs need the M3 driver work.
+- M5: B.O.S.S. answers on :8080 at `192.168.100.10`; `boss.lan` needs DNS on the
+  venue router (avahi publishes `boss.local`). The x86 A.S.T.R.O. image uses
+  `DHCP=yes` (`astro/rootfs/etc/systemd/network/10-wired.network`), and
+  `astro-daemon` defaults `BOSS_ENDPOINT` to `http://boss:8080` so multiple
+  cabinets do not clash on one LAN.
+- `beercade-hal` A/B slot switching, boot counting, and health-gated boot
+  blessing are implemented (`systemd-bless-boot` on x86_64, `tryboot.txt` on
+  RPi, U-Boot `bootcount`/`altbootcmd` on RK3588, wired via
+  `beercade-boot-check.sh`).
+- `boss.conf` includes split NIC/GPU `linux-firmware-*` packages plus `mesa` /
+  `vulkan-radeon` / `vulkan-intel` / `vulkan-icd-loader` for hardware-accelerated
+  kiosk rendering on bare-metal PCs alongside the Hyper-V `hyperv_drm` guard.
 
 ### M3 — A.S.T.R.O. PC runtime (built; hardware gate open)
-`make image-x86` → `out/beercade-astro-x86_64.raw` (8.75 GiB raw: root slots
-grew to 4 GiB; squashfs 1324 MiB incl. ES-DE, `.zst` 2.66 GiB, `.vhdx` 2.85 GiB).
-`make verify-x86` passes: `astro-tune`, `astro-daemon`, `astro-frontend`
-active with one ES-DE process and no restarts, DATA grown on a 16 GB disk, the
-patched RetroArch runs, ≥10 libretro cores installed.
-- **RetroArch**: the fork lived only as an unversioned copy in
-  `.ai-ignore/archive/beercade-input-audio`. Its one change (the `drm_gfx.c`
-  hook) is now `astro/emulators/retroarch/patches/0001-*.patch` against
-  upstream v1.22.2. `astro/emulators/retroarch/build_x86_64.sh` builds
-  `astro/rt` + RetroArch (`-march=x86-64-v3`, KMS/plain DRM/EGL/GL/Vulkan,
-  udev, ALSA, SDL2; no X11/Wayland/Pulse) as an assembler `NATIVE_BUILDS`
-  step and checks the hook is linked.
+`make image-x86` → `out/beercade-astro-x86_64.raw` (+ `.raw.zst` and `.vhdx`;
+root slots are 4 GiB each). `shared/tests/verify_qemu_x86_64.sh astro` verifies
+`astro-tune`, `astro-daemon`, `astro-frontend` (resident `astro-shell`), DATA
+growth on a 16 GB disk, `hv_vmbus`, RetroArch, and ≥10 libretro cores.
+- **RetroArch**: upstream v1.22.2 built via `astro/emulators/retroarch/build_x86_64.sh`
+  (`-march=x86-64-v3`, KMS/plain DRM/EGL/Vulkan, udev, ALSA, SDL2; no X11/Wayland/Pulse)
+  with `0001-*.patch` (`drm_gfx.c` hook) and `0002-astro-rt-vulkan-udev-input.patch`
+  (calls `astro_input_start()` and wires the `/dev/shm/astro_rt_stats` +
+  `/run/astro/menu.sock` pause bridge for Vulkan `khr_display` + udev).
 - **Config**: `astro/platform/x86_64/rootfs/root/.config/retroarch/retroarch.cfg`
-  replaces the RK3588 one (which had `audio_driver = "null"` and the RK DP
-  audio device): Vulkan `khr_display`, ALSA default device, udev input,
-  saves/states/BIOS/ROMs under `/data/beercade`.
-- **GPUs**: `mesa vulkan-radeon vulkan-intel nvidia-open nvidia-utils
-  linux-firmware`; nouveau blacklisted, `nvidia_drm modeset=1 fbdev=1`
+  uses Vulkan `khr_display`, ALSA default device, udev input, and locks out
+  menu toggles / `Escape` so exits go exclusively through the daemon pause menu.
+- **GPUs**: `mesa vulkan-radeon vulkan-intel nvidia-open nvidia-utils` plus
+  split `linux-firmware-{amdgpu,intel,radeon,realtek,mediatek,atheros,broadcom,marvell,other}`;
+  nouveau blacklisted, `nvidia_drm modeset=1 fbdev=1`
   (`astro/platform/x86_64/rootfs/etc/modprobe.d/beercade-gpu.conf`, notes in
   `astro/platform/x86_64/gpu.md`). The KMS launcher probes for the card with
   a connected output (skipping simpledrm/efifb), sets `SDL_VIDEODRIVER=kmsdrm`,
   `SDL_KMSDRM_DEVICE_INDEX`, and NVIDIA's GBM backend; `ASTRO_DEV` overrides.
 - **Latency**: `astro-tune` (`astro/tune`, started before `astro-daemon`):
-  `performance` governor/EPP, `AllowedCPUs` via `systemctl set-property
-  --runtime` — `astro-rt.slice` gets `beercade-hal`'s realtime set, `system`
-  / `user` slices and `init.scope` the rest — and holds
-  `/dev/cpu_dma_latency` = 0. Latency-critical units join with
-  `Slice=astro-rt.slice`.
+  `performance` governor/EPP, `AllowedCPUs` via direct cgroupfs writes (with
+  `systemctl set-property --runtime` fallback) — `astro-rt.slice` gets
+  `beercade-hal`'s realtime set, `system` / `user` slices and `init.scope` the
+  rest — and holds `/dev/cpu_dma_latency` = 0.
 - **Cores**: Arch `libretro-*` packages, see
   `astro/emulators/cores/cores_x86_64.md`.
-- **Frontend**: ES-DE v3.5.0 built from source (`astro/emulators/frontend/es-de/
-  build_x86_64.sh`; FreeImage, dropped from the Arch repos, is built from its
-  AUR recipe pinned to a commit). `astro-frontend.service` runs it on tty1 in
-  `astro-rt.slice` through the KMS launcher, with its home on `/data/beercade`
-  (ROMs in `/data/beercade/roms`). RetroArch is launched by ES-DE.
+- **Customer Shell (`astro-shell`) & Session Launch**: ES-DE has been removed
+  and replaced by the resident Rust + SDL2 KMS shell (`astro/shell`), launched by
+  `astro-frontend.service` (`astro_frontend_start.sh`). `astro-daemon` drives
+  attract mode and `BRC-XXXX` patron sessions over `/run/astro/shell.sock`
+  (`SIGSTOP`/`SIGCONT` DRM handoff in `shell_ipc.rs`), streams/caches ROMs via
+  LRU staging with SHA-256 verification (`staging.rs`), and spawns
+  `/usr/bin/retroarch` directly.
 - **CPU floor x86-64-v3** (AVX2/FMA/BMI2, Haswell / Zen and newer) for
-  everything compiled here; the frontend unit checks the CPU and skips itself
-  below that. QEMU gates run with `-cpu max` (TCG's default CPU is v1).
+  compiled native/frontend binaries; `astro-frontend.service` checks CPU flags
+  and skips itself below v3. QEMU gates run with `-cpu max` (TCG default is v1).
 - **Optimisations applied** (see `docs/OPTIMIZATION_BACKLOG.md`): shader
   caches on `/data`, DATA grows to fill the disk on first boot (both x86
-  images), split firmware packages, `usbhid.jspoll=1`, ES-DE hardware video
-  decoding. The backlog lists the rest for x86 and RK3588.
+  images + ARM), split firmware packages, `usbhid.jspoll=1`, `astro_rt`
+  1000 Hz Vulkan/udev pause bridge, and `sd_notify` readiness.
 
 Open (needs decisions or hardware):
 - **Gate not run**: frame-time measurement on real AMD, NVIDIA and Intel
   machines with `benchmark_frametimes.py`. Only QEMU boots are verified.
-- **Input hook is inert**: it drains the astro_rt ring and discards the
-  events; nothing starts the astro_rt producer; and it lives in the plain
-  `drm` driver while the config uses Vulkan. Parity with ARM, which is the same.
 - **Missing cores**: FBNeo, DuckStation, PCSX2 are not packaged in Arch.
 - `astro/rt/deploy` udev/limits rules are RK3588-specific (rockchipdp0 audio)
   and not installed on x86.
-- **ASTRO Startup Behavior & Attract Mode / Interface Overhaul (Future Roadmap)**:
-  - Avoid booting into blank or unconfigured stock ES-DE interface when no game is actively selected.
-  - Option A: Boot with a curated Nintendo/SNES attraction game selected at random from bundled titles (e.g., *Donkey Kong Country*, *Donkey Kong Country 3*, *Bubsy II*, *Batman Returns* staged in `astro/roms/`).
-  - Option B: Display a custom retro "No cartridge installed" / attract screen matching the B.O.S.S. design system, featuring arcade booking prompts ("Book your time") and upcoming venue bookings/calendar sync.
-  - Keep interface overhaul aligned with future unified platform shell (deferred while B.O.S.S. interface is stabilized).
 
-### M4 — Path ownership
-CODEOWNERS and a lint that keeps platform-specific files inside
-`astro/platform/<arch>/` and HAL code.
+### M4 — Path ownership (done)
+Root `CODEOWNERS` and `scripts/lint_governance.py` (CI `governance` job in
+`.github/workflows/ci.yml`) enforce path ownership coverage, Cargo workspace
+crate-boundary rules, `beercade-shared` platform-I/O purity, and confinement of
+arch-specific boot files to `{shared,astro,boss}/platform/<arch>/`,
+`shared/buildfarm/<arch>/`, or `shared/tests/`.
 
-### M5 — End-to-end acceptance
-Extend `shared/tests/run_acceptance_tests.py`: x86 A.S.T.R.O. node → B.O.S.S.
-(x86 image) → `POST /api/v1/edge/ingest` → D1, plus mixed ARM/x86 telemetry.
+### M5 — End-to-end acceptance (harness ready; 24h hardware soak pending)
+`shared/tests/m5_venue_soak.py` exercises `x86_64` + `aarch64` A.S.T.R.O.
+nodes → B.O.S.S. (`:8080` + UDP `:9750` netplay relay + OTA `/api/v1/sync`) →
+`POST /api/v1/edge/ingest` → D1/KV (`--mode smoke` self-contained local check;
+`--mode venue --duration-secs 86400` against live fleet). See
+`docs/M5_VENUE_SOAK_RUNBOOK.md` for full hardware soak procedures.
 
 ## Housekeeping
-- The graphify graph in `.ai-ignore/archive/graphify-out` is stale (1 Oct)
-  and dominated by `node_modules`, type definitions and shaders. Regenerate
-  with a proper `.graphifyignore` before relying on it.
-- First-boot `DATA` partition resize on x86 (`astro/scripts/first_boot_resize.sh`
-  is ARM-oriented).
+- Root `graphify-out/` holds the Graphify structural index (configured via
+  `.graphifyignore`); refresh with `graphify update .` after structural changes.
+- First-boot `DATA` partition resize uses `beercade-grow-data.service` across
+  both x86_64 and aarch64 images (`astro/scripts/first_boot_resize.sh` was
+  removed).

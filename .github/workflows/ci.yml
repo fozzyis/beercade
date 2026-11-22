@@ -1,0 +1,78 @@
+name: CI
+
+# One branch, two architectures: every push builds and tests the Rust
+# workspace natively on x86_64 (ubuntu-24.04) and arm64 (ubuntu-24.04-arm).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build & test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libsdl2-dev libsdl2-ttf-dev cmake g++ ninja-build pkg-config >/dev/null
+      - name: Check
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check --workspace --locked
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: TypeScript wire proto drift check
+        run: cargo run -p beercade-shared --locked --bin gen_ts_proto -- --check
+      - name: astro_rt CMake build & test
+        run: |
+          cmake -S astro/rt -B /tmp/astro_rt_build -G Ninja
+          cmake --build /tmp/astro_rt_build
+          ctest --test-dir /tmp/astro_rt_build --output-on-failure
+      - name: Release build
+        run: cargo build --release --locked -p astro-daemon -p astro-shell -p astro-tune -p boss-server
+      - name: Show binaries
+        run: ls -lh target/release/astro-daemon target/release/astro-shell target/release/astro-tune target/release/boss-server
+
+  frontends:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Website
+        run: npm --prefix website ci && npm --prefix website run check
+      - name: Kiosk UI
+        run: npm --prefix boss/kiosk_ui ci && npm --prefix boss/kiosk_ui run check
+
+  governance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: M4 CODEOWNERS & crate-boundary lint
+        run: python3 scripts/lint_governance.py
+      - name: x86_64 payload firmware & Hyper-V verifier static tests
+        run: python3 shared/tests/test_x86_payload_and_vhdx.py

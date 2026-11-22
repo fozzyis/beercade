@@ -1,0 +1,37 @@
+# B.E.E.R.C.A.D.E. Path Ownership (enforced by M4 governance lint in CI)
+* @fozzyis
+
+# CI, governance & documentation
+/.github/ @fozzyis
+/scripts/ @fozzyis
+/docs/ @fozzyis
+/Cargo.toml @fozzyis
+/Cargo.lock @fozzyis
+/Makefile @fozzyis
+
+# Shared contracts, HAL, platform assets, buildfarm & verification
+/shared/crates/beercade-shared/ @fozzyis
+/shared/crates/beercade-hal/ @fozzyis
+/shared/proto/ @fozzyis
+/shared/platform/ @fozzyis
+/shared/buildfarm/ @fozzyis
+/shared/tests/ @fozzyis
+
+# A.S.T.R.O. cabinet runtime & platform boundaries
+/astro/daemon/ @fozzyis
+/astro/shell/ @fozzyis
+/astro/tune/ @fozzyis
+/astro/rt/ @fozzyis
+/astro/platform/ @fozzyis
+/astro/emulators/ @fozzyis
+/astro/launcher/ @fozzyis
+/astro/rootfs/ @fozzyis
+
+# B.O.S.S. venue operations server, kiosk UI & plugins
+/boss/ @fozzyis
+/boss/kiosk_ui/ @fozzyis
+/boss/platform/ @fozzyis
+/boss/plugin_sdk/ @fozzyis
+
+# Customer website & Cloudflare edge workers
+/website/ @fozzyis

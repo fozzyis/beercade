@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Boot-verify an x86_64 image under QEMU + OVMF (TCG) in a Docker container.
+# Boot-verify an x86_64 image (.raw or .vhdx) under QEMU + OVMF (TCG) in a Docker container.
 # Usage: verify_qemu_x86_64.sh [payload] [image]
 #        payload astro (default) or boss; image defaults to out/beercade-<payload>-x86_64.raw.
-#        A single argument ending in .raw is taken as an astro image (old usage).
+#        A single argument ending in .raw or .vhdx is taken as an astro image.
 # Env:   VERIFY_TIMEOUT (seconds for the whole run), QEMU_IMAGE (default debian:bookworm)
 # Exit:  0 pass, 1 fail, 2 timeout
 #
@@ -30,8 +30,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 PAYLOAD="${1:-astro}"
-if [[ "$PAYLOAD" == *.raw ]]; then set -- astro "$PAYLOAD"; PAYLOAD=astro; fi
+if [[ "$PAYLOAD" == *.raw || "$PAYLOAD" == *.vhdx ]]; then set -- astro "$PAYLOAD"; PAYLOAD=astro; fi
 IMG="${2:-out/beercade-$PAYLOAD-x86_64.raw}"
+IMG_FMT="raw"
+if [[ "$IMG" == *.vhdx ]]; then IMG_FMT="vhdx"; fi
 BASE_IMAGE="${QEMU_IMAGE:-debian:bookworm}"
 TAG="beercade-qemu-x86-2"
 OUT_DIR="$REPO_ROOT/out"
@@ -48,21 +50,21 @@ case "$PAYLOAD" in
 astro)
   TIMEOUT="${VERIFY_TIMEOUT:-480}" MEM=2048
   FAIL_RE="$FAIL_RE|Failed to start astro-daemon|astro-daemon\.service: Failed|astro-daemon\.service: Main process exited"
-  CHECK[0]='echo "VERIFY $(systemctl is-active multi-user.target astro-tune.service astro-daemon.service astro-frontend.service | paste -sd,) es=$(pgrep -cx es-de) restarts=$(systemctl show -p NRestarts --value astro-frontend.service) data=$(df -BG --output=size /data | awk "NR==2{print (\$1+0>=5)?\"grown\":\$1}") ra=$(retroarch --version >/dev/null 2>&1 && echo ok) cores=$(ls /usr/lib/libretro/*_libretro.so 2>/dev/null | wc -l | awk "{print (\$1>=10)?\"ok\":\$1}") END"'
-  EXPECT[0]='VERIFY active,active,active,active es=1 restarts=0 data=grown ra=ok cores=ok END'
+  CHECK[0]='echo "VERIFY $(systemctl is-active multi-user.target astro-tune.service astro-daemon.service astro-frontend.service | paste -sd,) shell=$(pgrep -cx astro-shell) restarts=$(systemctl show -p NRestarts --value astro-frontend.service) hv=$(modinfo hv_vmbus >/dev/null 2>&1 && echo ok || echo missing) data=$(df -BG --output=size /data | awk "NR==2{print (\$1+0>=5)?\"grown\":\$1}") ra=$(retroarch --version >/dev/null 2>&1 && echo ok) cores=$(ls /usr/lib/libretro/*_libretro.so 2>/dev/null | wc -l | awk "{print (\$1>=10)?\"ok\":\$1}") END"'
+  EXPECT[0]='VERIFY active,active,active,active shell=1 restarts=0 hv=ok data=grown ra=ok cores=ok END'
   ;;
 boss)
   TIMEOUT="${VERIFY_TIMEOUT:-1200}" MEM=3072
   FAIL_RE="$FAIL_RE|Failed to start boss|boss-server\.service: Main process exited"
-  boss_check='echo "VERIFY$(echo @N@) $(systemctl is-active multi-user.target seatd.service boss-server.service boss-kiosk.service | paste -sd,) http=$(curl -fsS -m5 http://127.0.0.1:8080/api/health) ui=$(curl -sS -m5 -o /dev/null -w %{http_code} http://127.0.0.1:8080/) cage=$(pgrep -cx cage) restarts=$(systemctl show -p NRestarts --value boss-kiosk.service) $(grep -o "root=PARTLABEL=[A-Z_]*" /proc/cmdline) data=$(df -BG --output=size /data | awk "NR==2{print (\$1+0>=5)?\"grown\":\$1}") persist=$(cat /data/verify-persist 2>/dev/null || echo none) END"'
+  boss_check='echo "VERIFY$(echo @N@) $(systemctl is-active multi-user.target seatd.service boss-server.service boss-kiosk.service | paste -sd,) http=$(curl -fsS -m5 http://127.0.0.1:8080/api/health) ui=$(curl -sS -m5 -o /dev/null -w %{http_code} http://127.0.0.1:8080/) cage=$(pgrep -cx cage) restarts=$(systemctl show -p NRestarts --value boss-kiosk.service) hv=$(modinfo hv_vmbus >/dev/null 2>&1 && echo ok || echo missing) $(grep -o "root=PARTLABEL=[A-Z_]*" /proc/cmdline) data=$(df -BG --output=size /data | awk "NR==2{print (\$1+0>=5)?\"grown\":\$1}") persist=$(cat /data/verify-persist 2>/dev/null || echo none) END"'
   # Boot 1 (slot A): services, HTTP, kiosk; then write /data, switch to B, reboot.
   CHECK[0]="${boss_check//@N@/1}"
-  EXPECT[0]='VERIFY1 active,active,active,active http=ok ui=200 cage=1 restarts=0 root=PARTLABEL=ROOT_A data=grown persist=none END'
+  EXPECT[0]='VERIFY1 active,active,active,active http=ok ui=200 cage=1 restarts=0 hv=ok root=PARTLABEL=ROOT_A data=grown persist=none END'
   ACTION[0]="echo $NONCE > /data/verify-persist && sync && bootctl set-default beercade-slot-b.conf && echo \"SWITCH \$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntryDefault-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\\0') END\" && systemctl reboot"
   ACTION_EXPECT[0]='SWITCH beercade-slot-b.conf END'
   # Boot 2 (slot B): same checks, plus the /data file from boot 1.
   CHECK[1]="${boss_check//@N@/2}"
-  EXPECT[1]="VERIFY2 active,active,active,active http=ok ui=200 cage=1 restarts=0 root=PARTLABEL=ROOT_B data=grown persist=$NONCE END"
+  EXPECT[1]="VERIFY2 active,active,active,active http=ok ui=200 cage=1 restarts=0 hv=ok root=PARTLABEL=ROOT_B data=grown persist=$NONCE END"
   ;;
 *) echo "FAIL: unknown payload $PAYLOAD" >&2; exit 1 ;;
 esac
@@ -107,7 +109,10 @@ EOF
 # shellcheck disable=SC2016
 INNER='set -e
 cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/vars.fd
-qemu-img create -q -f qcow2 -b /image.raw -F raw /tmp/disk.qcow2 ${DISK_GB}G
+if [ "$IMG_FMT" = "vhdx" ]; then
+  qemu-img check -f vhdx /image.disk
+fi
+qemu-img create -q -f qcow2 -b /image.disk -F "$IMG_FMT" /tmp/disk.qcow2 ${DISK_GB}G
 mkfifo /tmp/ser.in /tmp/ser.out
 cat /tmp/ser.out > /dev/null &
 exec qemu-system-x86_64 -machine q35 -cpu max -m $MEM -smp 2 -accel tcg \
@@ -119,8 +124,8 @@ exec qemu-system-x86_64 -machine q35 -cpu max -m $MEM -smp 2 -accel tcg \
   -chardev pipe,id=s0,path=/tmp/ser,logfile=/out/$LOGNAME \
   -vga std -display none -monitor none -serial chardev:s0'
 
-echo "Booting $IMG (timeout ${TIMEOUT}s, container $CNAME) ..."
-docker run -d --name "$CNAME" -e DROPIN_B64="$DROPIN_B64" -e MEM="$MEM" -e DISK_GB="$DISK_GB" -e LOGNAME="$(basename "$LOG")" -v "$H_IMG:/image.raw:ro" -v "$H_OUT:/out" "$TAG" bash -c "$INNER" >/dev/null
+echo "Booting $IMG (format $IMG_FMT, timeout ${TIMEOUT}s, container $CNAME) ..."
+docker run -d --name "$CNAME" -e DROPIN_B64="$DROPIN_B64" -e MEM="$MEM" -e DISK_GB="$DISK_GB" -e IMG_FMT="$IMG_FMT" -e LOGNAME="$(basename "$LOG")" -v "$H_IMG:/image.disk:ro" -v "$H_OUT:/out" "$TAG" bash -c "$INNER" >/dev/null
 
 clean_log() { sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' -e 's/\r//g' "$LOG" > "$CLEAN" 2>/dev/null || : > "$CLEAN"; }
 has_fail() { grep -E "$FAIL_RE" "$CLEAN" 2>/dev/null | head -5; }
